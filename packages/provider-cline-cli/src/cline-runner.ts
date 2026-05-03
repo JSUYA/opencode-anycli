@@ -89,12 +89,27 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     ...(options.env ?? {}),
   }
 
+  // stdin handling — TTY-on by default:
+  //   - default "inherit": cline shares the parent's stdin file descriptor.
+  //     If the parent's stdin is a TTY, cline (and any bash subprocess it
+  //     spawns) can prompt the user interactively — required for `sudo`
+  //     password prompts, `ssh-add`, `gh auth login`, etc. opencode pauses
+  //     I/O during provider calls in our observed behaviour, so this does
+  //     not race the TUI.
+  //   - "ignore" (env OPENCODE_ANYCLI_TTY=0 or --no-tty): cline cannot
+  //     read from the parent terminal. Use this for non-interactive CI
+  //     runs where you want cline isolated, or to suppress accidental
+  //     stdin consumption from a piped parent.
+  const ttyEnv = process.env["OPENCODE_ANYCLI_TTY"]
+  const wantTty = ttyEnv !== "0" // default ON
+  const stdin: "ignore" | "inherit" = wantTty ? "inherit" : "ignore"
+
   let child: ChildProcessWithoutNullStreams
   try {
     child = spawnImpl(options.command, args, {
       cwd: options.cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdin, "pipe", "pipe"],
     }) as unknown as ChildProcessWithoutNullStreams
   } catch (err) {
     yield { type: "error", error: wrapErr(err, `Failed to spawn cline (${options.command})`) }

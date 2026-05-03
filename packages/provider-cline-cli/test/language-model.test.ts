@@ -45,6 +45,22 @@ function fakeSpawn(stdoutLines: string[], opts?: { exitCode?: number }) {
 }
 
 /**
+ * Capturing fake spawn that records the spawn options it received so we can
+ * assert on stdio settings. Returns the fake proc otherwise like fakeSpawn.
+ */
+function capturingSpawn(stdoutLines: string[]): {
+  fn: typeof import("node:child_process").spawn
+  capturedOptions: { value: { stdio?: unknown } | null }
+} {
+  const captured: { value: { stdio?: unknown } | null } = { value: null }
+  const fn = ((_cmd: string, _args?: readonly string[], options?: { stdio?: unknown }) => {
+    captured.value = options ?? {}
+    return makeFakeProc(stdoutLines, {}) as unknown as ChildProcessWithoutNullStreams
+  }) as unknown as typeof import("node:child_process").spawn
+  return { fn, capturedOptions: captured }
+}
+
+/**
  * Fake proc that NEVER closes on its own. Used to test timeout / abort paths —
  * the test relies on the runner's own kill() to trigger close. The fake's kill
  * implementation emits a `close` event with code=null and the signal name.
@@ -221,6 +237,37 @@ describe("runOnce", () => {
         spawnFn: externalKillSpawn,
       }),
     ).rejects.toThrow(/terminated by signal SIGKILL/)
+  })
+
+  it("uses stdio[0]='inherit' for stdin by default (TTY ON)", async () => {
+    const out = ['{"type":"say","say":"text","text":"x","partial":false}']
+    const cap = capturingSpawn(out)
+    delete process.env["OPENCODE_ANYCLI_TTY"]
+    await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: cap.fn,
+    })
+    expect(cap.capturedOptions.value).not.toBeNull()
+    const stdio = (cap.capturedOptions.value as { stdio?: unknown[] }).stdio
+    expect(stdio?.[0]).toBe("inherit")
+  })
+
+  it("uses stdio[0]='ignore' when OPENCODE_ANYCLI_TTY=0 (opt-out)", async () => {
+    const out = ['{"type":"say","say":"text","text":"x","partial":false}']
+    const cap = capturingSpawn(out)
+    process.env["OPENCODE_ANYCLI_TTY"] = "0"
+    try {
+      await runOnce({
+        prompt: "ignored",
+        options: { command: "cline", timeoutMs: 5000 },
+        spawnFn: cap.fn,
+      })
+      const stdio = (cap.capturedOptions.value as { stdio?: unknown[] }).stdio
+      expect(stdio?.[0]).toBe("ignore")
+    } finally {
+      delete process.env["OPENCODE_ANYCLI_TTY"]
+    }
   })
 
   it("does not double-emit when an unrelated text segment follows a final say", async () => {

@@ -27,6 +27,7 @@ interface Args {
   version?: boolean | undefined
   help?: boolean | undefined
   autoApprove?: boolean | undefined
+  noTty?: boolean | undefined
   passthrough: string[]
 }
 
@@ -64,6 +65,13 @@ function parseArgs(argv: readonly string[]): Args {
       case "-y":
         out.autoApprove = true
         break
+      case "--tty":
+        // Backwards-compat: TTY is now ON by default. Accepting --tty
+        // remains a no-op so existing scripts don't break.
+        break
+      case "--no-tty":
+        out.noTty = true
+        break
       default:
         out.passthrough.push(a)
     }
@@ -71,6 +79,10 @@ function parseArgs(argv: readonly string[]): Args {
   // OPENCODE_ANYCLI_AUTO_APPROVE=1 is equivalent to --auto-approve.
   if (process.env["OPENCODE_ANYCLI_AUTO_APPROVE"] === "1") {
     out.autoApprove = true
+  }
+  // OPENCODE_ANYCLI_TTY=0 is equivalent to --no-tty.
+  if (process.env["OPENCODE_ANYCLI_TTY"] === "0") {
+    out.noTty = true
   }
   return out
 }
@@ -101,6 +113,16 @@ Flags:
                            propagates auto-approve to the OUTER opencode
                            layer too. Per-key user-set "deny" rules in your
                            own config are still honored.
+  --tty                    DEPRECATED no-op. TTY is now on by default —
+                           the cline subprocess inherits the parent's
+                           stdin so interactive prompts (sudo, ssh-add,
+                           gh auth login) can read from your terminal.
+                           Kept for backwards compatibility with existing
+                           scripts.
+  --no-tty                 Opt out of the TTY default. Use for CI runs or
+                           when you want cline isolated from the parent's
+                           stdin (e.g. piped input the user doesn't want
+                           cline to consume).
   --version, -V            Print version and exit
   --help, -h               Print this help and exit
 
@@ -110,6 +132,7 @@ Environment:
   OPENCODE_ANYCLI_CLINE_BIN     Override path to the cline binary
   OPENCODE_ANYCLI_CONFIG        Override config file path
   OPENCODE_ANYCLI_AUTO_APPROVE  Set to "1" to imply --auto-approve
+  OPENCODE_ANYCLI_TTY           Set to "0" to imply --no-tty (default ON)
   DEBUG=1                       Print cline NDJSON events to stderr
 `)
 }
@@ -254,6 +277,7 @@ async function main(): Promise<void> {
     XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] || `${homedir()}/.config/opencode-anycli`,
     OPENCODE_DISABLE_MODELS_FETCH: process.env["OPENCODE_DISABLE_MODELS_FETCH"] ?? "1",
     ...(args.autoApprove ? { OPENCODE_ANYCLI_AUTO_APPROVE: "1" } : {}),
+    ...(args.noTty ? { OPENCODE_ANYCLI_TTY: "0" } : {}),
   }
   const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
   child.on("close", (code, signal) => {

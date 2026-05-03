@@ -95,6 +95,36 @@ opencode-anycli --update --user --sudo    # multiple args also OK
    symlink-target-equal skip), so a no-op update completes in under a second
    and produces zero `.bak` files.
 
+## Interactive Subprocesses & sudo
+
+opencode-anycli keeps the cline subprocess's stdin connected to the
+parent TTY **by default**, so commands the agent runs can prompt the
+user — `sudo`, `ssh-add`, `gh auth login`, `expect`-style flows, etc.
+The wrapper does not need a flag for this; it is the default.
+
+```bash
+opencode-anycli                # TTY enabled by default
+opencode-anycli --no-tty       # opt out (for CI / pipe-fed runs)
+OPENCODE_ANYCLI_TTY=0 opencode-anycli   # env-var equivalent of --no-tty
+```
+
+Caveats — there are TWO layers below us we cannot directly control:
+
+1. **opencode's bash tool** spawns its own subprocesses. Whether those
+   inherit a TTY is opencode's implementation detail.
+2. **cline's bash tool** likewise. `--tty` (now the default) gives cline
+   itself TTY-stdin; whether cline forwards that to the bash commands it
+   runs is cline's call.
+
+If `sudo` still says "no tty" or never prompts, see the `sudo-helper`
+skill in oh-my-anycli for three reliable workarounds:
+
+- **Passwordless sudo for specific commands** (`/etc/sudoers.d/...`
+  with `NOPASSWD: /usr/bin/apt-get update`)
+- **`SUDO_ASKPASS` helper** (GUI password prompt)
+- **Pre-authorize the sudo cache** (`sudo -v` outside opencode-anycli,
+  then start the session within the cache TTL)
+
 ## Auto-approve (Yolo Mode)
 
 opencode itself prompts for approval on file edits, bash commands, web
