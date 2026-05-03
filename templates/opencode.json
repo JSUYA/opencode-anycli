@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "cline": {
+      "npm": "file://__OPENCLINECLICODE_PROVIDER_DIST__",
+      "name": "Cline (cline CLI)",
+      "models": {
+        "default": {
+          "name": "Cline default (auto-detect from cline config)",
+          "limit": { "context": 128000, "output": 8192 }
+        }
+      },
+      "options": {
+        "mode": "subprocess"
+      }
+    }
+  },
+  "model": "cline/default",
+  "small_model": "cline/default"
+}

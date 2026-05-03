@@ -1,0 +1,28 @@
+{
+  "name": "openclineclicode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bundle that runs the opencode AI coding agent through the locally installed cline CLI",
+  "keywords": ["opencode", "cline", "ai-sdk", "coding-agent", "provider"],
+  "license": "MIT",
+  "author": "Project Maintainers",
+  "repository": {
+    "type": "git",
+    "url": "git+https://example.invalid/openclineclicode.git"
+  },
+  "homepage": "https://example.invalid/openclineclicode#readme",
+  "bugs": "https://example.invalid/openclineclicode/issues",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "doctor": "bash ./doctor.sh",
+    "install:bundle": "bash ./install.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

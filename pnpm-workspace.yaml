@@ -1,0 +1,5 @@
+# This project uses npm workspaces by default (see package.json).
+# This file is provided so that pnpm users can also install the workspace
+# without configuration. Both managers should produce a working install.
+packages:
+  - "packages/*"

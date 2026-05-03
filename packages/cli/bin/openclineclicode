@@ -1,0 +1,17 @@
+#!/usr/bin/env node
+// openclineclicode — thin entry point.
+// Resolves the compiled JS in dist/ and runs it.
+import { fileURLToPath } from "node:url"
+import { dirname, resolve } from "node:path"
+import { existsSync } from "node:fs"
+
+const here = dirname(fileURLToPath(import.meta.url))
+const target = resolve(here, "..", "dist", "index.js")
+
+if (!existsSync(target)) {
+  console.error(`openclineclicode: build artifact not found at ${target}.`)
+  console.error(`Run \`npm run build\` (or ./install.sh) first.`)
+  process.exit(1)
+}
+
+await import(target)

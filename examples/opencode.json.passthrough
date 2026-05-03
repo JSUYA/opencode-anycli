@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "cline": {
+      "npm": "file://__OPENCLINECLICODE_PROVIDER_DIST__",
+      "name": "Cline (passthrough)",
+      "models": {
+        "default": {
+          "name": "Cline passthrough (reads ~/.cline/data/globalState.json)",
+          "limit": { "context": 128000, "output": 8192 }
+        },
+        "custom-model": {
+          "name": "Custom model explicit",
+          "limit": { "context": 200000, "output": 8192 }
+        }
+      },
+      "options": {
+        "mode": "passthrough"
+      }
+    }
+  },
+  "model": "cline/default",
+  "small_model": "cline/default"
+}
