@@ -254,14 +254,54 @@ function ensureElevated(): void {
       a !== "--dangerously-skip-permissions",
   )
 
-  // Mark the child as already-elevated; preserve env via -E so HOME / PATH /
-  // OPENCODE_* / XDG_CONFIG_HOME / etc. survive sudo's env scrubbing.
-  const env = { ...process.env, OPENCODE_ANYCLI_ELEVATED: "1" }
+  // sudo's `secure_path` setting in /etc/sudoers REPLACES PATH after env_keep,
+  // so neither `-E` nor `--preserve-env=PATH` reliably propagates the user's
+  // PATH (where opencode / cline / nvm-managed node typically live, e.g.
+  // ~/.nvm/versions/node/<v>/bin). We work around this by chaining the
+  // elevated child through `env VAR=val ...`, which sets the env vars
+  // unconditionally AFTER sudo has finished scrubbing them. HOME is also
+  // re-pinned to the original user's home so the wrapper still finds the
+  // user's config (~/.config/opencode-anycli/...) instead of /root/.config/.
+  const passthrough: Record<string, string> = {
+    PATH: process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin",
+    HOME: process.env["HOME"] ?? "/root",
+    OPENCODE_ANYCLI_ELEVATED: "1",
+  }
+  // Note: USER / LOGNAME deliberately NOT propagated — let sudo set them
+  // to "root" so tools that key off the username (git commit author, etc.)
+  // see the actual euid rather than a lie. HOME is the only identity-ish
+  // var we override, because the wrapper's whole config-discovery flow
+  // assumes it points at the user's home.
+  for (const k of [
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "XDG_CONFIG_HOME",
+    "OPENCODE_CONFIG",
+    "OPENCODE_ANYCLI_CONFIG",
+    "OPENCODE_ANYCLI_CLINE_BIN",
+    "OPENCODE_ANYCLI_AUTO_APPROVE",
+    "OPENCODE_ANYCLI_TTY",
+    "OPENCODE_DISABLE_MODELS_FETCH",
+    "DEBUG",
+  ]) {
+    const v = process.env[k]
+    if (v !== undefined) passthrough[k] = v
+  }
+  const envArgs = Object.entries(passthrough).map(([k, v]) => `${k}=${v}`)
 
   const r = spawnSync(
     "sudo",
-    ["-E", "--", process.execPath, process.argv[1] ?? "", ...cleaned],
-    { stdio: "inherit", env },
+    [
+      "-E",
+      "--",
+      "env",
+      ...envArgs,
+      process.execPath,
+      process.argv[1] ?? "",
+      ...cleaned,
+    ],
+    { stdio: "inherit" },
   )
   process.exit(r.status ?? 1)
 }
