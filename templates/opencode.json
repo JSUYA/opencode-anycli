@@ -19,7 +19,12 @@
   "model": "cline/default",
   "small_model": "cline/default",
   "agent": {
-    "build": { "model": "cline/default" },
-    "plan":  { "model": "cline/default" }
+    "build":      { "model": "cline/default" },
+    "plan":       { "model": "cline/default" },
+    "compaction": { "model": "cline/default" },
+    "summary":    { "model": "cline/default" },
+    "title":      { "model": "cline/default" },
+    "explore":    { "model": "cline/default" },
+    "general":    { "model": "cline/default" }
   }
 }
