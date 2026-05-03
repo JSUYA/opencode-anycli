@@ -54,11 +54,15 @@ cd openclineclicode
 ./install.sh
 ```
 
-If `opencode` or `cline` is not on your `PATH`, the installer will offer to
-install them via `npm install -g opencode-ai` / `npm install -g cline` (default
-yes on Enter, declinable). For non-interactive runs add `--yes`. To force the
-old behaviour (fail when missing), use `--no-auto-deps`. Use `--sudo` if your
-npm prefix requires it.
+`opencode` and `cline` must be on your `PATH`. If they are missing the
+installer prints a clear hint and exits. To let the installer fetch them
+for you, opt in:
+
+```bash
+./install.sh --auto-deps           # prompts before each `npm install -g`
+./install.sh --auto-deps --yes     # non-interactive (CI)
+./install.sh --auto-deps --sudo    # if your npm prefix needs sudo
+```
 
 After installation, run:
 
