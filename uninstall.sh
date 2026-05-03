@@ -94,10 +94,10 @@ remove_symlink() {
 
 # ─── 1. Locate and remove the openclineclicode symlink ────────────────────────
 if [ "$SCOPE" = "none" ]; then
-  step "openclineclicode 심볼릭 링크 제거 / Skipping symlink removal (--no-symlink)"
+  step "Skipping openclineclicode symlink removal (--no-symlink)"
   targets=()
 else
-  step "openclineclicode 심볼릭 링크 제거 / Removing CLI symlink"
+  step "Removing openclineclicode CLI symlink"
   case "$SCOPE" in
     user)   targets=("$HOME/.local/bin/openclineclicode") ;;
     system) targets=("/usr/local/bin/openclineclicode") ;;
@@ -109,9 +109,9 @@ for t in "${targets[@]}"; do remove_symlink "$t" || true; done
 # ─── 2. Optionally purge config dir ───────────────────────────────────────────
 CONFIG_HOME="$HOME/.config/openclineclicode"
 if [ "$PURGE_CONFIG" = "1" ]; then
-  step "설정 디렉터리 제거 / Purging $CONFIG_HOME"
+  step "Purging config directory $CONFIG_HOME"
   if [ -d "$CONFIG_HOME" ]; then
-    if confirm "정말 $CONFIG_HOME 전체를 삭제할까요? (oh-my-clinecli 설치물 포함)"; then
+    if confirm "Delete all of $CONFIG_HOME, including oh-my-clinecli installed artifacts?"; then
       rm -rf "$CONFIG_HOME"
       ok "removed $CONFIG_HOME"
     else
@@ -128,7 +128,7 @@ fi
 
 # ─── 3. Optionally purge build artifacts in this repo ─────────────────────────
 if [ "$PURGE_BUILD" = "1" ]; then
-  step "빌드 산출물 제거 / Purging dist/ and node_modules/"
+  step "Purging build artifacts: dist/ and node_modules/"
   removed=0
   for d in "$REPO_DIR/node_modules" \
            "$REPO_DIR/packages/cli/node_modules" \
@@ -147,19 +147,19 @@ fi
 # ─── 4. Final advice ──────────────────────────────────────────────────────────
 cat <<EOF
 
-${GREEN}제거 완료 / Uninstall complete${RESET}
+${GREEN}Uninstall complete${RESET}
 
-${DIM}건드리지 않은 것 / Left intact:${RESET}
-  - opencode / cline 바이너리 자체
-  - ~/.cline/ (cline 자체 설정)
-  - ~/.config/opencode/ (사용자 표준 opencode 설정)
+${DIM}Left intact:${RESET}
+  - opencode and cline binaries
+  - ~/.cline/ (cline settings)
+  - ~/.config/opencode/ (standard opencode settings)
 EOF
 
 if [ "$PURGE_CONFIG" = "0" ] && [ -d "$CONFIG_HOME" ]; then
-  printf "  - %s ${DIM}(--purge-config 로 제거 가능)${RESET}\n" "$CONFIG_HOME"
+  printf "  - %s ${DIM}(remove with --purge-config)${RESET}\n" "$CONFIG_HOME"
 fi
 if [ "$PURGE_BUILD" = "0" ]; then
-  printf "  - %s ${DIM}(--purge-build 로 제거 가능)${RESET}\n" "$REPO_DIR/{packages/*/dist,packages/*/node_modules}"
+  printf "  - %s ${DIM}(remove with --purge-build)${RESET}\n" "$REPO_DIR/{packages/*/dist,packages/*/node_modules}"
 fi
 echo
-echo "${DIM}이 저장소 자체를 지우려면 그냥 디렉터리를 삭제하세요: rm -rf $REPO_DIR${RESET}"
+echo "${DIM}To remove this checkout itself, delete the directory: rm -rf $REPO_DIR${RESET}"

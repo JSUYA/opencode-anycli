@@ -34,6 +34,18 @@ No source files are copied from opencode, cline, or the AI SDK. We import
 - cline CLI already knows how to call the user's configured model.
 - This bundle connects the two without asking users to duplicate model settings in opencode.
 
+## Coding Advantages Over Plain cline CLI
+
+openclineclicode does not improve model quality by itself; cline still uses the same configured model. The advantage is that coding work runs inside opencode's project-oriented workflow instead of a raw one-shot CLI prompt.
+
+- **Better codebase navigation:** use opencode's TUI, session context, and file-aware workflow while delegating model calls to cline.
+- **More structured implementation:** feature work can be handled as inspect -> plan -> edit -> verify instead of a single loose prompt.
+- **More reliable debugging:** runtime failures can be analyzed through code-path tracing, ranked hypotheses, minimal fixes, and follow-up tests.
+- **Config isolation:** openclineclicode keeps its opencode config, skills, commands, and agents under `~/.config/openclineclicode` instead of mixing them with a user's normal opencode setup.
+- **Workflow extension point:** oh-my-clinecli can add reusable slash commands, skills, and subagents on top of the same cline-backed model path.
+
+For tiny edits or quick questions, direct cline CLI can still be faster. openclineclicode is most useful when the coding task benefits from navigation, repeatable process, and verification.
+
 ## Install
 
 ```bash
