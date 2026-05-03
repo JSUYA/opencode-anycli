@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — one-shot installer for openclineclicode.
+# install.sh — one-shot installer for opencode-anycli.
 # Idempotent. Safe to re-run. macOS + Linux. POSIX-friendly bash.
 set -e
 
@@ -31,7 +31,7 @@ for arg in "$@"; do
       cat <<EOF
 Usage: ./install.sh [--user] [--skip-build] [--sudo] [--no-auto-deps]
 
-  openclineclicode treats opencode + cline as bundled runtime dependencies.
+  opencode-anycli treats opencode + cline as bundled runtime dependencies.
   If either is missing, this installer fetches them via npm by default —
   no extra flag needed. The user-visible install is just:
       git clone … && cd … && ./install.sh
@@ -69,7 +69,7 @@ auto_npm_install() {
     return 1
   fi
   local log_file
-  log_file="$(mktemp -t openclineclicode-npm.XXXXXX)"
+  log_file="$(mktemp -t opencode-anycli-npm.XXXXXX)"
   info "Running: npm install -g $pkg"
   if [ "$USE_SUDO" -eq 1 ]; then
     if sudo npm install -g "$pkg"; then : ; else
@@ -137,7 +137,7 @@ elif [ "$NO_AUTO_DEPS" -eq 1 ]; then
   err "  Install manually: npm install -g opencode-ai"
   exit 1
 else
-  step "opencode is part of openclineclicode's runtime; installing it now"
+  step "opencode is part of opencode-anycli's runtime; installing it now"
   auto_npm_install opencode-ai opencode "opencode" || exit 1
 fi
 
@@ -149,7 +149,7 @@ elif [ "$NO_AUTO_DEPS" -eq 1 ]; then
   err "  Install manually: npm install -g cline"
   exit 1
 else
-  step "cline is part of openclineclicode's runtime; installing it now"
+  step "cline is part of opencode-anycli's runtime; installing it now"
   auto_npm_install cline cline "cline" || exit 1
 fi
 
@@ -184,12 +184,12 @@ else
 fi
 
 # ─── 6. Copy default config ───────────────────────────────────────────────────
-# Path layout note: the wrapper sets XDG_CONFIG_HOME=$HOME/.config/openclineclicode
+# Path layout note: the wrapper sets XDG_CONFIG_HOME=$HOME/.config/opencode-anycli
 # at spawn time, so opencode auto-discovers commands/agents/skills under
-# $HOME/.config/openclineclicode/opencode/. The opencode.json must therefore
+# $HOME/.config/opencode-anycli/opencode/. The opencode.json must therefore
 # live one directory deeper than the wrapper's XDG dir.
 step "Installing default opencode.json"
-CONFIG_DIR="$HOME/.config/openclineclicode/opencode"
+CONFIG_DIR="$HOME/.config/opencode-anycli/opencode"
 mkdir -p "$CONFIG_DIR"
 TARGET="$CONFIG_DIR/opencode.json"
 SOURCE="$REPO_DIR/templates/opencode.json"
@@ -203,7 +203,7 @@ note_path() { printf "  ${DIM}↳ provider dist: %s${RESET}\n" "$*"; }
 # Idempotent: if the existing config already substitutes to the current
 # PROVIDER_DIST path, skip the write entirely (no .bak file proliferation).
 # Compare against what we would have written.
-EXPECTED="$(sed "s|__OPENCLINECLICODE_PROVIDER_DIST__|${PROVIDER_DIST}|g" "$SOURCE")"
+EXPECTED="$(sed "s|__OPENCODE_ANYCLI_PROVIDER_DIST__|${PROVIDER_DIST}|g" "$SOURCE")"
 if [ -f "$TARGET" ] && [ "$(cat "$TARGET")" = "$EXPECTED" ]; then
   ok "Config already up-to-date: $TARGET"
   note_path "$PROVIDER_DIST"
@@ -226,8 +226,8 @@ if [ ! -f "$AGENTS_TARGET" ]; then
 fi
 
 # ─── 7. Symlink the CLI ───────────────────────────────────────────────────────
-step "Linking openclineclicode binary"
-BIN_SRC="$REPO_DIR/packages/cli/bin/openclineclicode"
+step "Linking opencode-anycli binary"
+BIN_SRC="$REPO_DIR/packages/cli/bin/opencode-anycli"
 chmod +x "$BIN_SRC" || true
 
 # Idempotent symlink helper: skip if the symlink already points where we want.
@@ -250,7 +250,7 @@ ensure_symlink() {
 if [ "$USER_INSTALL" -eq 1 ]; then
   TARGET_DIR="$HOME/.local/bin"
   mkdir -p "$TARGET_DIR"
-  ensure_symlink "$TARGET_DIR/openclineclicode" 0
+  ensure_symlink "$TARGET_DIR/opencode-anycli" 0
   case ":$PATH:" in
     *":$TARGET_DIR:"*) : ;;
     *) warn "$TARGET_DIR is not in PATH. Add this to your shell profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
@@ -258,9 +258,9 @@ if [ "$USER_INSTALL" -eq 1 ]; then
 else
   TARGET_DIR="/usr/local/bin"
   if [ -w "$TARGET_DIR" ]; then
-    ensure_symlink "$TARGET_DIR/openclineclicode" 0
+    ensure_symlink "$TARGET_DIR/opencode-anycli" 0
   elif [ "$USE_SUDO" -eq 1 ]; then
-    ensure_symlink "$TARGET_DIR/openclineclicode" 1
+    ensure_symlink "$TARGET_DIR/opencode-anycli" 1
   else
     warn "$TARGET_DIR is not writable."
     info "Re-run with ./install.sh --user or ./install.sh --sudo."
@@ -273,8 +273,8 @@ cat <<EOF
 
 ${GREEN}installation complete / Installation complete${RESET}
 
-  1) Run diagnostics:        ${BLUE}openclineclicode --doctor${RESET}
-  2) Start opencode:         ${BLUE}openclineclicode${RESET}
+  1) Run diagnostics:        ${BLUE}opencode-anycli --doctor${RESET}
+  2) Start opencode:         ${BLUE}opencode-anycli${RESET}
   3) Edit config:            ${BLUE}\$EDITOR $TARGET${RESET}
   4) Troubleshooting:        ${BLUE}docs/troubleshooting.md${RESET}
   5) Try passthrough later:  ${BLUE}docs/provider-modes.md${RESET}

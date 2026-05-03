@@ -40,7 +40,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
 
   constructor(modelId: string, options: ClineProviderOptions = {}) {
     this.modelId = modelId
-    const envOverrideBin = process.env["OPENCLINECLICODE_CLINE_BIN"]
+    const envOverrideBin = process.env["OPENCODE_ANYCLI_CLINE_BIN"]
     this.options = {
       mode: options.mode ?? "subprocess",
       command: envOverrideBin ?? options.command ?? "cline",

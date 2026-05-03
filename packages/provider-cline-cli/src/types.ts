@@ -1,4 +1,4 @@
-// Shared types for @openclineclicode/provider-cline-cli.
+// Shared types for @opencode-anycli/provider-cline-cli.
 
 export type ClineMode = "subprocess" | "passthrough"
 

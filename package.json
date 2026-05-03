@@ -1,5 +1,5 @@
 {
-  "name": "openclineclicode",
+  "name": "opencode-anycli",
   "version": "0.1.0",
   "private": true,
   "description": "Bundle that runs the opencode AI coding agent through the locally installed cline CLI",
@@ -8,10 +8,10 @@
   "author": "Project Maintainers",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JSUYA/openclineclicode.git"
+    "url": "git+https://github.com/JSUYA/opencode-anycli.git"
   },
-  "homepage": "https://github.com/JSUYA/openclineclicode#readme",
-  "bugs": "https://github.com/JSUYA/openclineclicode/issues",
+  "homepage": "https://github.com/JSUYA/opencode-anycli#readme",
+  "bugs": "https://github.com/JSUYA/opencode-anycli/issues",
   "workspaces": [
     "packages/*"
   ],

@@ -1,6 +1,6 @@
 # Installation
 
-This guide installs openclineclicode so opencode can run through the local cline CLI.
+This guide installs opencode-anycli so opencode can run through the local cline CLI.
 
 ## Prerequisites
 
@@ -14,12 +14,12 @@ This guide installs openclineclicode so opencode can run through the local cline
 ## Quick Install
 
 ```bash
-git clone https://github.com/JSUYA/openclineclicode.git
-cd openclineclicode
+git clone https://github.com/JSUYA/opencode-anycli.git
+cd opencode-anycli
 ./install.sh
 ```
 
-The installer checks Node, opencode, and cline, builds the workspace, writes the default `opencode.json`, and links the `openclineclicode` binary.
+The installer checks Node, opencode, and cline, builds the workspace, writes the default `opencode.json`, and links the `opencode-anycli` binary.
 
 ## Options
 
@@ -31,19 +31,19 @@ The installer checks Node, opencode, and cline, builds the workspace, writes the
 
 ## Cline First Run
 
-Run cline once before using openclineclicode:
+Run cline once before using opencode-anycli:
 
 ```bash
 cline
 ```
 
-Complete cline's model and credential setup. openclineclicode expects `~/.cline/data/globalState.json` to exist.
+Complete cline's model and credential setup. opencode-anycli expects `~/.cline/data/globalState.json` to exist.
 
 ## Reinstall From Existing Build
 
 ```bash
-tar czf openclineclicode-bundle.tgz openclineclicode/
-tar xzf openclineclicode-bundle.tgz
-cd openclineclicode
+tar czf opencode-anycli-bundle.tgz opencode-anycli/
+tar xzf opencode-anycli-bundle.tgz
+cd opencode-anycli
 ./install.sh --skip-build --user
 ```

@@ -1,4 +1,4 @@
-// openclineclicode CLI entry point.
+// opencode-anycli CLI entry point.
 //
 // Responsibilities (kept intentionally thin):
 //   1. Parse a tiny subset of args (--config, --init, --doctor, --version, --help).
@@ -57,12 +57,12 @@ function parseArgs(argv: readonly string[]): Args {
 }
 
 function printHelp(): void {
-  process.stdout.write(`openclineclicode v${VERSION}
+  process.stdout.write(`opencode-anycli v${VERSION}
 
 Run opencode through the locally configured cline CLI.
 
 Usage:
-  openclineclicode [flags] [...opencode-args]
+  opencode-anycli [flags] [...opencode-args]
 
 Flags:
   --config <path>   Use a specific opencode.json (default: ${defaultConfigPath()})
@@ -74,8 +74,8 @@ Flags:
 Anything not listed above is passed through to opencode unchanged.
 
 Environment:
-  OPENCLINECLICODE_CLINE_BIN   Override path to the cline binary
-  OPENCLINECLICODE_CONFIG      Override config file path
+  OPENCODE_ANYCLI_CLINE_BIN   Override path to the cline binary
+  OPENCODE_ANYCLI_CONFIG      Override config file path
   DEBUG=1                      Print cline NDJSON events to stderr
 `)
 }
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
     return
   }
   if (args.version) {
-    process.stdout.write(`openclineclicode ${VERSION}\n`)
+    process.stdout.write(`opencode-anycli ${VERSION}\n`)
     return
   }
   if (args.doctor) {
@@ -131,7 +131,7 @@ async function main(): Promise<void> {
   // Ensure config file exists.
   const cfg = resolveConfig({ configFlag: args.config, init: args.init })
   if (cfg.created) {
-    process.stderr.write(`openclineclicode: created default config at ${cfg.path}\n`)
+    process.stderr.write(`opencode-anycli: created default config at ${cfg.path}\n`)
   }
   if (args.init) {
     process.stdout.write(`Config initialized at ${cfg.path}\n`)
@@ -140,7 +140,7 @@ async function main(): Promise<void> {
 
   // Spawn opencode with OPENCODE_CONFIG pointing at our resolved file.
   // Also set XDG_CONFIG_HOME so opencode auto-discovers our wrapper-private
-  // commands/agents/skills in ~/.config/openclineclicode/opencode/ instead of
+  // commands/agents/skills in ~/.config/opencode-anycli/opencode/ instead of
   // the user's primary ~/.config/opencode/. The user can still override by
   // setting XDG_CONFIG_HOME themselves.
   //
@@ -158,7 +158,7 @@ async function main(): Promise<void> {
   const env = {
     ...process.env,
     OPENCODE_CONFIG: cfg.path,
-    XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] || `${homedir()}/.config/openclineclicode`,
+    XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] || `${homedir()}/.config/opencode-anycli`,
     OPENCODE_DISABLE_MODELS_FETCH: process.env["OPENCODE_DISABLE_MODELS_FETCH"] ?? "1",
   }
   const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
@@ -175,6 +175,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  process.stderr.write(`openclineclicode: ${err instanceof Error ? err.message : String(err)}\n`)
+  process.stderr.write(`opencode-anycli: ${err instanceof Error ? err.message : String(err)}\n`)
   process.exit(1)
 })

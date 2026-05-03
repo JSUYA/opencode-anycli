@@ -2,10 +2,10 @@
 # uninstall.sh — remove what install.sh placed on this machine.
 #
 # What this removes:
-#   1. The `openclineclicode` symlink in /usr/local/bin or ~/.local/bin
-#   2. Optionally: ~/.config/openclineclicode/ (the wrapper's XDG home,
+#   1. The `opencode-anycli` symlink in /usr/local/bin or ~/.local/bin
+#   2. Optionally: ~/.config/opencode-anycli/ (the wrapper's XDG home,
 #      including opencode.json + AGENTS.md + any .bak backups + anything
-#      oh-my-clinecli installed under it). Default behaviour KEEPS the
+#      oh-my-anycli installed under it). Default behaviour KEEPS the
 #      config so a re-install can restore it; pass --purge-config to remove.
 #   3. Optionally: dist/ + node_modules/ inside this repo (the build).
 #      Default keeps them; pass --purge-build to remove.
@@ -13,11 +13,11 @@
 # What this does NOT touch:
 #   - The `opencode` and `cline` binaries themselves (you installed those).
 #   - ~/.cline/ (cline's own config; never ours to delete).
-#   - The user's standard ~/.config/opencode/ (we use openclineclicode/).
+#   - The user's standard ~/.config/opencode/ (we use opencode-anycli/).
 #
 # Usage:
 #   ./uninstall.sh                 # remove symlink only, keep config + build
-#   ./uninstall.sh --purge-config  # also remove ~/.config/openclineclicode/
+#   ./uninstall.sh --purge-config  # also remove ~/.config/opencode-anycli/
 #   ./uninstall.sh --purge-build   # also remove this repo's dist/+node_modules
 #   ./uninstall.sh --purge-all     # both --purge-config and --purge-build
 #   ./uninstall.sh --user          # symlink lives at ~/.local/bin (default: auto)
@@ -92,26 +92,26 @@ remove_symlink() {
   fi
 }
 
-# ─── 1. Locate and remove the openclineclicode symlink ────────────────────────
+# ─── 1. Locate and remove the opencode-anycli symlink ────────────────────────
 if [ "$SCOPE" = "none" ]; then
-  step "Skipping openclineclicode symlink removal (--no-symlink)"
+  step "Skipping opencode-anycli symlink removal (--no-symlink)"
   targets=()
 else
-  step "Removing openclineclicode CLI symlink"
+  step "Removing opencode-anycli CLI symlink"
   case "$SCOPE" in
-    user)   targets=("$HOME/.local/bin/openclineclicode") ;;
-    system) targets=("/usr/local/bin/openclineclicode") ;;
-    auto)   targets=("/usr/local/bin/openclineclicode" "$HOME/.local/bin/openclineclicode") ;;
+    user)   targets=("$HOME/.local/bin/opencode-anycli") ;;
+    system) targets=("/usr/local/bin/opencode-anycli") ;;
+    auto)   targets=("/usr/local/bin/opencode-anycli" "$HOME/.local/bin/opencode-anycli") ;;
   esac
 fi
 for t in "${targets[@]}"; do remove_symlink "$t" || true; done
 
 # ─── 2. Optionally purge config dir ───────────────────────────────────────────
-CONFIG_HOME="$HOME/.config/openclineclicode"
+CONFIG_HOME="$HOME/.config/opencode-anycli"
 if [ "$PURGE_CONFIG" = "1" ]; then
   step "Purging config directory $CONFIG_HOME"
   if [ -d "$CONFIG_HOME" ]; then
-    if confirm "Delete all of $CONFIG_HOME, including oh-my-clinecli installed artifacts?"; then
+    if confirm "Delete all of $CONFIG_HOME, including oh-my-anycli installed artifacts?"; then
       rm -rf "$CONFIG_HOME"
       ok "removed $CONFIG_HOME"
     else

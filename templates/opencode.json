@@ -3,7 +3,7 @@
   "enabled_providers": ["cline"],
   "provider": {
     "cline": {
-      "npm": "file://__OPENCLINECLICODE_PROVIDER_DIST__",
+      "npm": "file://__OPENCODE_ANYCLI_PROVIDER_DIST__",
       "name": "Cline (cline CLI)",
       "models": {
         "default": {

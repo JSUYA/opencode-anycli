@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# doctor.sh — diagnostic report for openclineclicode.
+# doctor.sh — diagnostic report for opencode-anycli.
 # Prints a colored status report and exits 0 if everything passes.
 set -u
 
@@ -16,7 +16,7 @@ note() { printf "  ${DIM}↳ %s${RESET}\n" "$*"; }
 warn() { printf "  ${YELLOW}⚠${RESET} %s\n" "$*"; }
 section() { printf "\n${BLUE}▶ %s${RESET}\n" "$*"; }
 
-printf "${BLUE}openclineclicode doctor${RESET}\n"
+printf "${BLUE}opencode-anycli doctor${RESET}\n"
 printf "${DIM}Diagnostic report - %s${RESET}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
 
 # ─── Node ─────────────────────────────────────────────────────────────────────
@@ -73,9 +73,9 @@ else
   note "Run cline once and complete its first-run setup."
 fi
 
-# ─── openclineclicode config ──────────────────────────────────────────────────
-section "openclineclicode configuration / config"
-OCC="$HOME/.config/openclineclicode/opencode/opencode.json"
+# ─── opencode-anycli config ──────────────────────────────────────────────────
+section "opencode-anycli configuration / config"
+OCC="$HOME/.config/opencode-anycli/opencode/opencode.json"
 if [ -f "$OCC" ]; then
   if node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$OCC" >/dev/null 2>&1; then
     ok "$OCC  (valid JSON)"

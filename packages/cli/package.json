@@ -1,5 +1,5 @@
 {
-  "name": "openclineclicode",
+  "name": "opencode-anycli",
   "version": "0.1.0",
   "description": "Thin CLI wrapper that runs opencode through the cline CLI adapter.",
   "keywords": ["opencode", "cline", "cli", "coding-agent"],
@@ -7,15 +7,15 @@
   "author": "Project Maintainers",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JSUYA/openclineclicode.git",
+    "url": "git+https://github.com/JSUYA/opencode-anycli.git",
     "directory": "packages/cli"
   },
-  "homepage": "https://github.com/JSUYA/openclineclicode#readme",
-  "bugs": "https://github.com/JSUYA/openclineclicode/issues",
+  "homepage": "https://github.com/JSUYA/opencode-anycli#readme",
+  "bugs": "https://github.com/JSUYA/opencode-anycli/issues",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "openclineclicode": "./bin/openclineclicode"
+    "opencode-anycli": "./bin/opencode-anycli"
   },
   "files": [
     "dist",
@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@openclineclicode/provider-cline-cli": "0.1.0"
+    "@opencode-anycli/provider-cline-cli": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

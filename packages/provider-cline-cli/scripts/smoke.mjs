@@ -9,7 +9,7 @@ const TIMEOUT_MS = 90_000
 const PROMPT = "Reply with just the single word: pong"
 
 const provider = createCline({
-  command: process.env.OPENCLINECLICODE_CLINE_BIN || "cline",
+  command: process.env.OPENCODE_ANYCLI_CLINE_BIN || "cline",
   timeoutMs: TIMEOUT_MS,
 })
 const model = provider.languageModel("default")

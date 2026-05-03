@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// openclineclicode — thin entry point.
+// opencode-anycli — thin entry point.
 // Resolves the compiled JS in dist/ and runs it.
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
@@ -9,7 +9,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const target = resolve(here, "..", "dist", "index.js")
 
 if (!existsSync(target)) {
-  console.error(`openclineclicode: build artifact not found at ${target}.`)
+  console.error(`opencode-anycli: build artifact not found at ${target}.`)
   console.error(`Run \`npm run build\` (or ./install.sh) first.`)
   process.exit(1)
 }

@@ -1,5 +1,5 @@
 {
-  "name": "@openclineclicode/provider-cline-cli",
+  "name": "@opencode-anycli/provider-cline-cli",
   "version": "0.1.0",
   "description": "Vercel AI SDK v3 LanguageModelV3 adapter that delegates to a locally installed cline CLI subprocess.",
   "keywords": ["ai-sdk", "ai-sdk-provider", "cline", "opencode", "language-model-v3"],
@@ -7,11 +7,11 @@
   "author": "Project Maintainers",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JSUYA/openclineclicode.git",
+    "url": "git+https://github.com/JSUYA/opencode-anycli.git",
     "directory": "packages/provider-cline-cli"
   },
-  "homepage": "https://github.com/JSUYA/openclineclicode/tree/main/packages/provider-cline-cli#readme",
-  "bugs": "https://github.com/JSUYA/openclineclicode/issues",
+  "homepage": "https://github.com/JSUYA/opencode-anycli/tree/main/packages/provider-cline-cli#readme",
+  "bugs": "https://github.com/JSUYA/opencode-anycli/issues",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

@@ -3,7 +3,7 @@
 Start with:
 
 ```bash
-openclineclicode --doctor
+opencode-anycli --doctor
 ```
 
 ## cline Returns No Text

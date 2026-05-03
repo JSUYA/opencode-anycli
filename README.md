@@ -1,8 +1,8 @@
-# openclineclicode
+# opencode-anycli
 
 > Run the opencode AI coding agent through your locally installed cline CLI.
 
-openclineclicode installs a small opencode adapter that forwards model requests to `cline --json --yolo --act <prompt>`. cline keeps using the model, credentials, and tool behavior the user has already configured.
+opencode-anycli installs a small opencode adapter that forwards model requests to `cline --json --yolo --act <prompt>`. cline keeps using the model, credentials, and tool behavior the user has already configured.
 
 ## Upstream projects & what this bundle adds
 
@@ -17,10 +17,10 @@ layer that lets the two tools talk to each other.
 
 **This bundle adds (new code in this repo):**
 
-- `@openclineclicode/provider-cline-cli` — `LanguageModelV3` implementation that
+- `@opencode-anycli/provider-cline-cli` — `LanguageModelV3` implementation that
   spawns cline as a subprocess and parses its NDJSON event stream
-- `openclineclicode` CLI — thin entry point that resolves config, sets
-  `XDG_CONFIG_HOME=$HOME/.config/openclineclicode` for isolation, and spawns
+- `opencode-anycli` CLI — thin entry point that resolves config, sets
+  `XDG_CONFIG_HOME=$HOME/.config/opencode-anycli` for isolation, and spawns
   opencode with stdio inherited
 - Templates (`templates/opencode.json`, `templates/AGENTS.md`),
   install/doctor scripts, docs, and 52 unit tests
@@ -36,28 +36,28 @@ No source files are copied from opencode, cline, or the AI SDK. We import
 
 ## Coding Advantages Over Plain cline CLI
 
-openclineclicode does not improve model quality by itself; cline still uses the same configured model. The advantage is that coding work runs inside opencode's project-oriented workflow instead of a raw one-shot CLI prompt.
+opencode-anycli does not improve model quality by itself; cline still uses the same configured model. The advantage is that coding work runs inside opencode's project-oriented workflow instead of a raw one-shot CLI prompt.
 
 - **Better codebase navigation:** use opencode's TUI, session context, and file-aware workflow while delegating model calls to cline.
 - **More structured implementation:** feature work can be handled as inspect -> plan -> edit -> verify instead of a single loose prompt.
 - **More reliable debugging:** runtime failures can be analyzed through code-path tracing, ranked hypotheses, minimal fixes, and follow-up tests.
-- **Config isolation:** openclineclicode keeps its opencode config, skills, commands, and agents under `~/.config/openclineclicode` instead of mixing them with a user's normal opencode setup.
-- **Workflow extension point:** oh-my-clinecli can add reusable slash commands, skills, and subagents on top of the same cline-backed model path.
+- **Config isolation:** opencode-anycli keeps its opencode config, skills, commands, and agents under `~/.config/opencode-anycli` instead of mixing them with a user's normal opencode setup.
+- **Workflow extension point:** oh-my-anycli can add reusable slash commands, skills, and subagents on top of the same cline-backed model path.
 
-For tiny edits or quick questions, direct cline CLI can still be faster. openclineclicode is most useful when the coding task benefits from navigation, repeatable process, and verification.
+For tiny edits or quick questions, direct cline CLI can still be faster. opencode-anycli is most useful when the coding task benefits from navigation, repeatable process, and verification.
 
 ## Install
 
 ```bash
-git clone https://github.com/JSUYA/openclineclicode.git
-cd openclineclicode
+git clone https://github.com/JSUYA/opencode-anycli.git
+cd opencode-anycli
 ./install.sh
 ```
 
 `opencode` and `cline` are treated as **bundled runtime dependencies of
-openclineclicode** — if either is missing on `PATH`, the installer fetches
+opencode-anycli** — if either is missing on `PATH`, the installer fetches
 it for you via `npm install -g` (no extra flag required). Conceptually,
-`openclineclicode` IS opencode + cline + our provider/config wired
+`opencode-anycli` IS opencode + cline + our provider/config wired
 together; the three pieces just happen to ship as separate npm packages
 upstream.
 
@@ -73,14 +73,14 @@ Optional flags:
 After installation, run:
 
 ```bash
-openclineclicode
+opencode-anycli
 ```
 
 ## Uninstall
 
 ```bash
-./uninstall.sh                 # remove the openclineclicode symlink only
-./uninstall.sh --purge-config  # also remove ~/.config/openclineclicode/
+./uninstall.sh                 # remove the opencode-anycli symlink only
+./uninstall.sh --purge-config  # also remove ~/.config/opencode-anycli/
 ./uninstall.sh --purge-build   # also remove dist/ + node_modules/
 ./uninstall.sh --purge-all     # both of the above
 ./uninstall.sh --yes           # skip confirmation prompts
@@ -107,7 +107,7 @@ The adapter implements the Vercel AI SDK v3 `LanguageModelV3` interface expected
 
 ## Companion Project
 
-[oh-my-clinecli](https://github.com/JSUYA/oh-my-clinecli) adds reusable skills, slash commands, subagents, and plugins on top of openclineclicode.
+[oh-my-anycli](https://github.com/JSUYA/oh-my-anycli) adds reusable skills, slash commands, subagents, and plugins on top of opencode-anycli.
 
 ## Documentation
 

@@ -1,11 +1,11 @@
-# @openclineclicode/provider-cline-cli
+# @opencode-anycli/provider-cline-cli
 
 A Vercel AI SDK v3 `LanguageModelV3` adapter that delegates generation to a locally installed `cline` CLI subprocess.
 
 ## Usage
 
 ```ts
-import { createCline } from "@openclineclicode/provider-cline-cli"
+import { createCline } from "@opencode-anycli/provider-cline-cli"
 
 const provider = createCline()
 const model = provider.languageModel("default")

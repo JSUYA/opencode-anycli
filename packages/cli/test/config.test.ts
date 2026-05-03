@@ -5,12 +5,12 @@ import { join } from "node:path"
 import { defaultConfigPath, resolveConfig, readConfig } from "../src/config.js"
 
 describe("defaultConfigPath", () => {
-  it("returns ~/.config/openclineclicode/opencode/opencode.json by default", () => {
-    expect(defaultConfigPath()).toBe(join(homedir(), ".config", "openclineclicode", "opencode", "opencode.json"))
+  it("returns ~/.config/opencode-anycli/opencode/opencode.json by default", () => {
+    expect(defaultConfigPath()).toBe(join(homedir(), ".config", "opencode-anycli", "opencode", "opencode.json"))
   })
 
   it("honors a custom home dir", () => {
-    expect(defaultConfigPath("/fake/home")).toBe("/fake/home/.config/openclineclicode/opencode/opencode.json")
+    expect(defaultConfigPath("/fake/home")).toBe("/fake/home/.config/opencode-anycli/opencode/opencode.json")
   })
 })
 
@@ -20,13 +20,13 @@ describe("resolveConfig", () => {
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "occ-cfg-"))
-    envBackup = process.env["OPENCLINECLICODE_CONFIG"]
-    delete process.env["OPENCLINECLICODE_CONFIG"]
+    envBackup = process.env["OPENCODE_ANYCLI_CONFIG"]
+    delete process.env["OPENCODE_ANYCLI_CONFIG"]
   })
 
   afterEach(() => {
-    if (envBackup === undefined) delete process.env["OPENCLINECLICODE_CONFIG"]
-    else process.env["OPENCLINECLICODE_CONFIG"] = envBackup
+    if (envBackup === undefined) delete process.env["OPENCODE_ANYCLI_CONFIG"]
+    else process.env["OPENCODE_ANYCLI_CONFIG"] = envBackup
     rmSync(tmp, { recursive: true, force: true })
   })
 
@@ -38,21 +38,21 @@ describe("resolveConfig", () => {
     expect(r.created).toBe(false)
   })
 
-  it("OPENCLINECLICODE_CONFIG env wins over default", () => {
+  it("OPENCODE_ANYCLI_CONFIG env wins over default", () => {
     const target = join(tmp, "env.json")
     writeFileSync(target, '{"$schema":"https://opencode.ai/config.json"}')
-    process.env["OPENCLINECLICODE_CONFIG"] = target
+    process.env["OPENCODE_ANYCLI_CONFIG"] = target
     const r = resolveConfig({})
     expect(r.path).toBe(target)
     expect(r.created).toBe(false)
   })
 
-  it("--config flag wins over OPENCLINECLICODE_CONFIG env", () => {
+  it("--config flag wins over OPENCODE_ANYCLI_CONFIG env", () => {
     const flagTarget = join(tmp, "flag.json")
     const envTarget = join(tmp, "env.json")
     writeFileSync(flagTarget, "{}")
     writeFileSync(envTarget, "{}")
-    process.env["OPENCLINECLICODE_CONFIG"] = envTarget
+    process.env["OPENCODE_ANYCLI_CONFIG"] = envTarget
     const r = resolveConfig({ configFlag: flagTarget })
     expect(r.path).toBe(flagTarget)
   })
@@ -95,7 +95,7 @@ describe("config integration with templates", () => {
     for (const c of candidates) {
       if (existsSync(c)) {
         const content = readFileSync(c, "utf8")
-        expect(content).toContain("__OPENCLINECLICODE_PROVIDER_DIST__")
+        expect(content).toContain("__OPENCODE_ANYCLI_PROVIDER_DIST__")
         return
       }
     }
@@ -125,9 +125,9 @@ describe("config sanity — installed path", () => {
     expect(r.created).toBe(true)
     expect(existsSync(target)).toBe(true)
     const content = readFileSync(target, "utf8")
-    // The CLI must substitute __OPENCLINECLICODE_PROVIDER_DIST__ → absolute
+    // The CLI must substitute __OPENCODE_ANYCLI_PROVIDER_DIST__ → absolute
     // file:// path to the built provider, otherwise opencode hits ProviderInitError.
-    expect(content).not.toContain("__OPENCLINECLICODE_PROVIDER_DIST__")
+    expect(content).not.toContain("__OPENCODE_ANYCLI_PROVIDER_DIST__")
     expect(content).toMatch(/file:\/\/.*\/provider-cline-cli\/dist\/index\.js/)
     // Sanity-check the surrounding JSON shape is intact.
     const parsed = JSON.parse(content) as { provider: { cline: { npm: string } } }

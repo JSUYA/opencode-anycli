@@ -2,12 +2,12 @@
 //
 // Precedence:
 //   1. --config <path> CLI flag
-//   2. OPENCLINECLICODE_CONFIG env var
-//   3. ~/.config/openclineclicode/opencode/opencode.json (default)
+//   2. OPENCODE_ANYCLI_CONFIG env var
+//   3. ~/.config/opencode-anycli/opencode/opencode.json (default)
 //
-// The default lives under ~/.config/openclineclicode/opencode/ — one level
+// The default lives under ~/.config/opencode-anycli/opencode/ — one level
 // deeper than the wrapper's XDG dir — so opencode reads it automatically when
-// the CLI launches it with XDG_CONFIG_HOME=~/.config/openclineclicode.
+// the CLI launches it with XDG_CONFIG_HOME=~/.config/opencode-anycli.
 //
 // Also handles --init: copies templates/opencode.json into the default location.
 
@@ -24,12 +24,12 @@ export interface ResolvedConfig {
 }
 
 export function defaultConfigPath(home = homedir()): string {
-  return join(home, ".config", "openclineclicode", "opencode", "opencode.json")
+  return join(home, ".config", "opencode-anycli", "opencode", "opencode.json")
 }
 
 export function resolveConfig(args: { configFlag?: string | undefined; init?: boolean | undefined }): ResolvedConfig {
   const fromFlag = args.configFlag ? resolve(args.configFlag) : undefined
-  const fromEnv = process.env["OPENCLINECLICODE_CONFIG"]
+  const fromEnv = process.env["OPENCODE_ANYCLI_CONFIG"]
   const target = fromFlag ?? fromEnv ?? defaultConfigPath()
 
   if (args.init || !existsSync(target)) {
@@ -40,7 +40,7 @@ export function resolveConfig(args: { configFlag?: string | undefined; init?: bo
     // install.sh does the same substitution; we mirror that logic so the CLI's
     // first-run auto-create produces an immediately-usable config.
     const tpl = readFileSync(templatePath, "utf8")
-    const resolved = tpl.replace(/__OPENCLINECLICODE_PROVIDER_DIST__/g, providerDist)
+    const resolved = tpl.replace(/__OPENCODE_ANYCLI_PROVIDER_DIST__/g, providerDist)
     writeFileSync(target, resolved, "utf8")
     return { path: target, created: true }
   }
@@ -71,7 +71,7 @@ function locateRepoArtifacts(): { templatePath: string; providerDist: string } {
   }
   throw new Error(
     `Could not locate templates/opencode.json. Tried walking up from ${here}. ` +
-      `Make sure you are running openclineclicode from a checkout of the repository.`,
+      `Make sure you are running opencode-anycli from a checkout of the repository.`,
   )
 }
 
