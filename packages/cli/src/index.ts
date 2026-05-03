@@ -23,6 +23,7 @@ interface Args {
   config?: string | undefined
   init?: boolean | undefined
   doctor?: boolean | undefined
+  update?: boolean | undefined
   version?: boolean | undefined
   help?: boolean | undefined
   autoApprove?: boolean | undefined
@@ -42,6 +43,13 @@ function parseArgs(argv: readonly string[]): Args {
         break
       case "--doctor":
         out.doctor = true
+        break
+      case "--update":
+        // Everything AFTER --update is forwarded to install.sh as-is, so the
+        // user can run `opencode-anycli --update --user --skip-build` etc.
+        out.update = true
+        out.passthrough.push(...argv.slice(i + 1))
+        i = argv.length
         break
       case "--version":
       case "-V":
@@ -79,6 +87,12 @@ Flags:
   --config <path>          Use a specific opencode.json (default: ${defaultConfigPath()})
   --init                   (Re)create the default config from the bundled template
   --doctor                 Run the diagnostic script and exit
+  --update […install.sh args]
+                           git pull --ff-only inside the cloned repo, then
+                           re-run install.sh (idempotent — reuses build
+                           cache and config when unchanged). Anything after
+                           --update is forwarded verbatim to install.sh,
+                           e.g. 'opencode-anycli --update --user --sudo'.
   --auto-approve, --yolo, -y
                            Materialize a temp config that sets every opencode
                            permission (read/edit/bash/external_directory/...)
@@ -101,24 +115,50 @@ Environment:
 }
 
 function runDoctor(): never {
-  // Find doctor.sh by walking up from this file.
-  const here = dirname(fileURLToPath(import.meta.url))
-  let cur = here
-  let scriptPath: string | null = null
-  for (let i = 0; i < 6; i++) {
-    const candidate = pathResolve(cur, "doctor.sh")
-    if (existsSync(candidate)) {
-      scriptPath = candidate
-      break
-    }
-    cur = dirname(cur)
-  }
+  const scriptPath = locateRepoArtifact("doctor.sh")
   if (!scriptPath) {
     process.stderr.write("doctor.sh not found in this checkout. Run from the repo root.\n")
     process.exit(2)
   }
   const r = spawnSync("bash", [scriptPath], { stdio: "inherit" })
   process.exit(r.status ?? 1)
+}
+
+function runUpdate(installArgs: string[]): never {
+  const installScript = locateRepoArtifact("install.sh")
+  if (!installScript) {
+    process.stderr.write("install.sh not found in this checkout. Run from the repo root.\n")
+    process.exit(2)
+  }
+  const repoDir = dirname(installScript)
+
+  process.stderr.write(`opencode-anycli: pulling latest in ${repoDir}\n`)
+  const pull = spawnSync("git", ["-C", repoDir, "pull", "--ff-only"], { stdio: "inherit" })
+  if (pull.status !== 0) {
+    process.stderr.write(
+      `git pull failed (exit ${pull.status ?? "?"}). Resolve the issue and re-run --update.\n` +
+        "Common causes: uncommitted local changes, divergent history, network unreachable.\n",
+    )
+    process.exit(pull.status ?? 1)
+  }
+
+  process.stderr.write(
+    `opencode-anycli: re-running install.sh ${installArgs.length > 0 ? installArgs.join(" ") : "(no extra args)"}\n`,
+  )
+  const install = spawnSync("bash", [installScript, ...installArgs], { stdio: "inherit", cwd: repoDir })
+  process.exit(install.status ?? 1)
+}
+
+/** Walk up from this file to find a sibling artifact (install.sh / doctor.sh). */
+function locateRepoArtifact(name: string): string | null {
+  const here = dirname(fileURLToPath(import.meta.url))
+  let cur = here
+  for (let i = 0; i < 6; i++) {
+    const candidate = pathResolve(cur, name)
+    if (existsSync(candidate)) return candidate
+    cur = dirname(cur)
+  }
+  return null
 }
 
 async function main(): Promise<void> {
@@ -134,6 +174,9 @@ async function main(): Promise<void> {
   }
   if (args.doctor) {
     runDoctor()
+  }
+  if (args.update) {
+    runUpdate(args.passthrough)
   }
 
   // Pre-flight checks. Fail fast with friendly hints.

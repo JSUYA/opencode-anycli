@@ -76,6 +76,79 @@ After installation, run:
 opencode-anycli
 ```
 
+## Update
+
+```bash
+opencode-anycli --update                  # git pull --ff-only + idempotent ./install.sh
+opencode-anycli --update --user           # forward extra args to install.sh
+opencode-anycli --update --user --sudo    # multiple args also OK
+```
+
+`--update` does two things in order:
+
+1. `git pull --ff-only` inside the cloned repo (the directory the running
+   binary lives in — auto-discovered by walking up from the symlink target).
+   Aborts cleanly with a clear message if the pull would not be a fast-forward
+   (uncommitted changes / divergent history / no network).
+2. Re-runs `./install.sh` with whatever extra args you passed. The install
+   script is idempotent (mtime-based build skip, byte-equal config skip,
+   symlink-target-equal skip), so a no-op update completes in under a second
+   and produces zero `.bak` files.
+
+## Auto-approve (Yolo Mode)
+
+opencode itself prompts for approval on file edits, bash commands, web
+fetches, external-directory access, and similar gated operations. For long
+unattended runs you can silence those prompts wholesale.
+
+### How to enable
+
+Three equivalent ways:
+
+```bash
+opencode-anycli --auto-approve     # explicit flag
+opencode-anycli --yolo             # alias
+opencode-anycli -y                 # short alias
+
+# or, persistent in your shell profile:
+export OPENCODE_ANYCLI_AUTO_APPROVE=1
+```
+
+When the flag is set, the wrapper materialises a session-scoped temp
+config that adds `"allow"` for every documented opencode permission:
+`read`, `edit`, `glob`, `grep`, `bash`, `task`, `skill`, `lsp`, `question`,
+`webfetch`, `websearch`, `external_directory`, `doom_loop`, plus the
+catch-all `*`. Your own explicit `"deny"` rules still win — for example,
+`bash: "deny"` in your personal `opencode.json` keeps blocking bash even
+with `--auto-approve`. The temp file is cleaned up on session exit
+(`exit`, `SIGINT`, `SIGTERM`).
+
+The cline subprocess is already invoked with `--yolo` by the provider, so
+the inner cline layer is unaffected by this flag — auto-approve here only
+silences the **outer opencode** layer that you actually see prompts from.
+
+### What it does NOT do
+
+- It does **not** toggle at runtime. opencode loads permissions at session
+  start and does not watch the config file. To turn auto-approve on or
+  off, exit and relaunch with (or without) the flag.
+- It does **not** override your explicit `"deny"` rules in your own
+  config — those keep blocking the relevant tool.
+- It does **not** suppress cline's auto-update / telemetry — those are
+  separate cline-internal behaviours (see `docs/troubleshooting.md`).
+
+### Safety
+
+`--auto-approve` removes a deliberate safety net. Use it only when:
+
+- you are working in a throwaway directory or a fresh git branch with
+  frequent commits;
+- the project has tests or another verifiable success criterion;
+- you will review the diff before pushing.
+
+Do **not** use it on production credentials, shared machines, or the first
+session you open in an unfamiliar repo.
+
 ## Uninstall
 
 ```bash
