@@ -143,11 +143,23 @@ async function main(): Promise<void> {
   // commands/agents/skills in ~/.config/openclineclicode/opencode/ instead of
   // the user's primary ~/.config/opencode/. The user can still override by
   // setting XDG_CONFIG_HOME themselves.
+  //
+  // OPENCODE_DISABLE_MODELS_FETCH=1: opencode normally pulls
+  // https://models.dev/api.json on startup and refreshes hourly to populate
+  // its model catalog with every public provider (openai, anthropic, etc.).
+  // We force-disable that here because:
+  //   (a) cline is the ONLY usable provider in this wrapper (single-provider
+  //       policy enforced by `enabled_providers: ["cline"]` in the config),
+  //   (b) the model picker should not advertise providers the user cannot
+  //       reach, and
+  //   (c) it removes one external network call from the wrapper's footprint.
+  // The user can opt back in by exporting OPENCODE_DISABLE_MODELS_FETCH=0.
   // Inherit stdio so the TUI works.
   const env = {
     ...process.env,
     OPENCODE_CONFIG: cfg.path,
     XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] || `${homedir()}/.config/openclineclicode`,
+    OPENCODE_DISABLE_MODELS_FETCH: process.env["OPENCODE_DISABLE_MODELS_FETCH"] ?? "1",
   }
   const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
   child.on("close", (code, signal) => {

@@ -1,5 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "enabled_providers": ["cline"],
   "provider": {
     "cline": {
       "npm": "file://__OPENCLINECLICODE_PROVIDER_DIST__",
@@ -16,5 +17,9 @@
     }
   },
   "model": "cline/default",
-  "small_model": "cline/default"
+  "small_model": "cline/default",
+  "agent": {
+    "build": { "model": "cline/default" },
+    "plan":  { "model": "cline/default" }
+  }
 }
