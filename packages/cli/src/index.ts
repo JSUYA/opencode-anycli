@@ -24,12 +24,18 @@ interface Args {
   init?: boolean | undefined
   doctor?: boolean | undefined
   update?: boolean | undefined
-  setupSudo?: boolean | undefined
-  setupDocker?: boolean | undefined
   version?: boolean | undefined
   help?: boolean | undefined
   autoApprove?: boolean | undefined
   noTty?: boolean | undefined
+  /**
+   * --allow-dangerously-skip-permissions: re-execute the entire session
+   * under sudo (one password prompt up front), so the inner cline + bash
+   * subprocesses run as root and can install packages, start daemons, etc.
+   * without ever prompting again. Implies --auto-approve. No persistent
+   * sudoers / configuration changes are made.
+   */
+  dangerouslySkipPermissions?: boolean | undefined
   passthrough: string[]
 }
 
@@ -54,18 +60,15 @@ function parseArgs(argv: readonly string[]): Args {
         out.passthrough.push(...argv.slice(i + 1))
         i = argv.length
         break
-      case "--setup-sudo":
-        // Anything after --setup-sudo is forwarded to setup-sudo.sh
-        // (e.g. --yes, --remove, --print, --for-docker).
-        out.setupSudo = true
-        out.passthrough.push(...argv.slice(i + 1))
-        i = argv.length
-        break
-      case "--setup-docker":
-        // Forwards to setup-docker.sh: install + group + start + verify.
-        out.setupDocker = true
-        out.passthrough.push(...argv.slice(i + 1))
-        i = argv.length
+      case "--allow-dangerously-skip-permissions":
+      case "--dangerously-skip-permissions":
+        // Single-flag escape hatch for "the agent needs to run privileged
+        // commands during this session." Implies --auto-approve so opencode's
+        // own permission prompts are also silenced. The actual elevation
+        // (re-exec under sudo) is performed in main(), once we know we are
+        // about to launch the session (not for --doctor / --update).
+        out.dangerouslySkipPermissions = true
+        out.autoApprove = true
         break
       case "--version":
       case "-V":
@@ -99,6 +102,11 @@ function parseArgs(argv: readonly string[]): Args {
   if (process.env["OPENCODE_ANYCLI_TTY"] === "0") {
     out.noTty = true
   }
+  // OPENCODE_ANYCLI_DANGEROUS=1 is equivalent to --allow-dangerously-skip-permissions.
+  if (process.env["OPENCODE_ANYCLI_DANGEROUS"] === "1") {
+    out.dangerouslySkipPermissions = true
+    out.autoApprove = true
+  }
   return out
 }
 
@@ -120,30 +128,18 @@ Flags:
                            cache and config when unchanged). Anything after
                            --update is forwarded verbatim to install.sh,
                            e.g. 'opencode-anycli --update --user --sudo'.
-  --setup-sudo […setup-sudo.sh args]
-                           Auto-detect the system package manager (apt /
-                           dnf / yum / pacman / zypper / apk) and install
-                           a SCOPED NOPASSWD sudoers rule so the agent
-                           can run package installs without password
-                           prompts (which the agent cannot answer through
-                           the cline subprocess). Forwarded args:
-                             --yes          apply without confirm
-                             --print        show what would be applied
-                             --remove       remove the rule
-                             --for-docker   also include usermod / systemctl
-                                            / groupadd / tee / chmod / gpasswd
-                                            so Docker setup helpers also run
-                                            without password
-                           macOS short-circuits with a no-op + advice.
-  --setup-docker […setup-docker.sh args]
-                           Linux: install Docker via the system package
-                           manager, enable + start dockerd via systemd,
-                           add the current user to the docker group,
-                           and verify with 'docker info'. Forwarded args:
-                             --yes     non-interactive
-                             --print   show plan, do not apply
-                           macOS short-circuits with brew/colima/orbstack
-                           guidance (Docker on macOS is GUI / VM-managed).
+  --allow-dangerously-skip-permissions
+  --dangerously-skip-permissions
+                           Re-exec the entire opencode-anycli session
+                           under 'sudo -E' so the inner cline + bash
+                           subprocesses run as root. The agent can then
+                           run apt/dnf install, systemctl, docker, etc.
+                           without ever hitting a password prompt. ONE
+                           sudo prompt at startup; nothing is written
+                           to /etc/sudoers.d. Implies --auto-approve.
+                           Trade-off: files created during the session
+                           will be root-owned. Use only when you trust
+                           the agent's full action set.
   --auto-approve, --yolo, -y
                            Materialize a temp config that sets every opencode
                            permission (read/edit/bash/external_directory/...)
@@ -172,6 +168,8 @@ Environment:
   OPENCODE_ANYCLI_CONFIG        Override config file path
   OPENCODE_ANYCLI_AUTO_APPROVE  Set to "1" to imply --auto-approve
   OPENCODE_ANYCLI_TTY           Set to "0" to imply --no-tty (default ON)
+  OPENCODE_ANYCLI_DANGEROUS     Set to "1" to imply
+                                --allow-dangerously-skip-permissions
   DEBUG=1                       Print cline NDJSON events to stderr
 `)
 }
@@ -211,27 +209,60 @@ function runUpdate(installArgs: string[]): never {
   process.exit(install.status ?? 1)
 }
 
-function runSetupSudo(extraArgs: string[]): never {
-  runRepoScript("scripts/setup-sudo.sh", extraArgs)
-}
+/**
+ * Re-exec the current process under `sudo -E` so the rest of the session
+ * (and every subprocess opencode/cline spawn) runs as root and never hits
+ * a sudo password prompt mid-run. Returns immediately if we are already
+ * root, the elevation marker env var is set, or the re-exec marker says
+ * we already came from a previous re-exec.
+ *
+ * Caller is responsible for printing intent BEFORE this is invoked, so the
+ * user understands the upcoming sudo prompt.
+ */
+function ensureElevated(): void {
+  // Already root? Nothing to do.
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0
+  if (isRoot) return
+  // Re-exec marker — guard against any accidental loop.
+  if (process.env["OPENCODE_ANYCLI_ELEVATED"] === "1") return
 
-function runSetupDocker(extraArgs: string[]): never {
-  runRepoScript("scripts/setup-docker.sh", extraArgs)
-}
-
-function runRepoScript(relPath: string, extraArgs: string[]): never {
-  const installScript = locateRepoArtifact("install.sh")
-  if (!installScript) {
-    process.stderr.write(`install.sh not found in this checkout — cannot find ${relPath}.\n`)
+  // Locate sudo. If it isn't available we cannot honor the flag.
+  const sudoCheck = spawnSync("sh", ["-c", "command -v sudo"], { stdio: "pipe" })
+  if (sudoCheck.status !== 0) {
+    process.stderr.write(
+      "--allow-dangerously-skip-permissions: 'sudo' not found on PATH.\n" +
+        "  Either run opencode-anycli as root directly, or install sudo.\n",
+    )
     process.exit(2)
   }
-  const repoDir = dirname(installScript)
-  const scriptPath = pathResolve(repoDir, relPath)
-  if (!existsSync(scriptPath)) {
-    process.stderr.write(`${relPath} not found at ${scriptPath}\n`)
-    process.exit(2)
-  }
-  const r = spawnSync("bash", [scriptPath, ...extraArgs], { stdio: "inherit", cwd: repoDir })
+
+  process.stderr.write(
+    [
+      "",
+      "⚠  --allow-dangerously-skip-permissions: re-executing under sudo.",
+      "   The entire opencode-anycli session (and every subprocess it spawns)",
+      "   will run as root. Files created during the session will be",
+      "   root-owned. Press Ctrl-C now to abort, or enter your password.",
+      "",
+    ].join("\n"),
+  )
+
+  // Strip our flag from argv so the re-execed instance doesn't recurse.
+  const cleaned = process.argv.slice(2).filter(
+    (a) =>
+      a !== "--allow-dangerously-skip-permissions" &&
+      a !== "--dangerously-skip-permissions",
+  )
+
+  // Mark the child as already-elevated; preserve env via -E so HOME / PATH /
+  // OPENCODE_* / XDG_CONFIG_HOME / etc. survive sudo's env scrubbing.
+  const env = { ...process.env, OPENCODE_ANYCLI_ELEVATED: "1" }
+
+  const r = spawnSync(
+    "sudo",
+    ["-E", "--", process.execPath, process.argv[1] ?? "", ...cleaned],
+    { stdio: "inherit", env },
+  )
   process.exit(r.status ?? 1)
 }
 
@@ -264,11 +295,13 @@ async function main(): Promise<void> {
   if (args.update) {
     runUpdate(args.passthrough)
   }
-  if (args.setupSudo) {
-    runSetupSudo(args.passthrough)
-  }
-  if (args.setupDocker) {
-    runSetupDocker(args.passthrough)
+
+  // Elevate BEFORE the pre-flight checks: those checks depend on PATH /
+  // env, which sudo will preserve via -E, and we want any subsequent
+  // log output (including "spawned opencode") to come from the elevated
+  // process so it accurately reflects where files end up.
+  if (args.dangerouslySkipPermissions) {
+    ensureElevated()
   }
 
   // Pre-flight checks. Fail fast with friendly hints.

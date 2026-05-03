@@ -89,33 +89,20 @@ else
   note "Run ./install.sh to install the default config."
 fi
 
-# ─── Sudo setup (interactive subprocess workaround) ──────────────────────────
-section "sudo NOPASSWD setup (for apt / dnf / etc. inside sessions)"
-SUDOERS_FILE="/etc/sudoers.d/opencode-anycli"
-case "$OS_NAME" in
-  Darwin)
-    note "macOS — Homebrew typically does not require sudo; nothing to check."
-    ;;
-  Linux)
-    if [ -f "$SUDOERS_FILE" ]; then
-      ok "$SUDOERS_FILE present"
-      note "$(grep -E 'NOPASSWD' "$SUDOERS_FILE" 2>/dev/null | head -1)"
-      if sudo -n -l 2>/dev/null | grep -q "NOPASSWD"; then
-        ok "sudo -n confirms an active NOPASSWD entry"
-      else
-        warn "$SUDOERS_FILE exists but sudo -n shows no NOPASSWD — it may be syntactically wrong"
-      fi
-    else
-      warn "$SUDOERS_FILE NOT present"
-      note "Sessions cannot run 'sudo apt install' interactively because the cline subprocess"
-      note "doesn't forward a TTY. To enable scoped passwordless sudo for the package manager:"
-      note "    opencode-anycli --setup-sudo"
-    fi
-    ;;
-  *)
-    note "Unsupported OS: $OS_NAME — sudo setup not applicable"
-    ;;
-esac
+# ─── Privileged-command escape hatch ─────────────────────────────────────────
+section "Privileged commands inside sessions"
+if command -v sudo >/dev/null 2>&1; then
+  ok "sudo present at $(command -v sudo)"
+  note "Run 'opencode-anycli --allow-dangerously-skip-permissions' if the agent"
+  note "needs to install packages, start daemons, or otherwise act as root."
+  note "(Re-execs the whole session under sudo -E — one prompt, no sudoers edits.)"
+else
+  case "$OS_NAME" in
+    Darwin) note "macOS — install sudo via the system if you need privileged commands." ;;
+    Linux)  warn "sudo not on PATH — --allow-dangerously-skip-permissions cannot work." ;;
+    *)      note "Unsupported OS: $OS_NAME" ;;
+  esac
+fi
 
 # ─── Smoke test ───────────────────────────────────────────────────────────────
 section "Smoke test (cline → 'doctor ok')"

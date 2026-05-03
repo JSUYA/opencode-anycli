@@ -116,66 +116,50 @@ Caveats — there are TWO layers below us we cannot directly control:
    itself TTY-stdin; whether cline forwards that to the bash commands it
    runs is cline's call.
 
-If `sudo` still says "no tty" or never prompts (the inner bash tool
-doesn't forward stdin), the most reliable fix is a SCOPED NOPASSWD
-sudoers entry. The wrapper ships an automated installer:
+If `sudo` inside an agent run still says "no tty" or hangs (the inner
+bash tool doesn't forward stdin), see **Allow Dangerously Skip
+Permissions** below — one flag, one prompt at startup, no persistent
+sudoers / system changes.
+
+## Allow Dangerously Skip Permissions
+
+When the agent needs to install packages, start daemons, run Docker, or
+otherwise act as root, **one flag** flips the whole session into
+elevated mode:
 
 ```bash
-opencode-anycli --setup-sudo            # auto-detect distro + interactive confirm
-opencode-anycli --setup-sudo --yes      # apply without prompt (CI / fresh box)
-opencode-anycli --setup-sudo --print    # show what would be applied, do not write
-opencode-anycli --setup-sudo --remove   # remove the rule
-opencode-anycli --setup-sudo --for-docker --yes   # also whitelist usermod / systemctl /
-                                                  # groupadd / tee / chmod / gpasswd so
-                                                  # `--setup-docker` runs unattended
+opencode-anycli --allow-dangerously-skip-permissions
+opencode-anycli --dangerously-skip-permissions      # alias
+OPENCODE_ANYCLI_DANGEROUS=1 opencode-anycli         # env-var equivalent
 ```
 
-It detects your package manager (`apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`),
-writes a scoped `/etc/sudoers.d/opencode-anycli` allowing ONLY those
-specific binaries to run without password (never `NOPASSWD: ALL`),
-validates with `visudo`, and verifies with `sudo -n -l`. macOS short-
-circuits with a no-op message because Homebrew does not need sudo.
+What it does:
 
-`opencode-anycli --doctor` reports whether the rule is installed and active.
+1. Re-execs the entire opencode-anycli process under `sudo -E`.
+   You enter your password **once**, at startup. From that moment on,
+   opencode + cline + every subprocess they spawn run as root, so the
+   agent can call `apt install`, `systemctl`, `docker pull`, `usermod`,
+   etc. without ever hitting another prompt.
+2. Implies `--auto-approve`, so opencode's own per-tool permission
+   prompts are also silenced for the session.
+3. Writes **nothing** to `/etc/sudoers.d/`, edits **no** system
+   configuration, and exits cleanly when the session ends. There is no
+   persistent privilege change to roll back.
 
-Other workarounds for non-package-manager prompts (covered in oh-my-anycli's
-`sudo-helper` skill, invoke via `/sudo`):
+Trade-offs (this is why "dangerously" is in the name — opt in
+deliberately):
 
-- **`SUDO_ASKPASS` helper** (GUI password prompt — useful for `ssh-add`)
-- **Pre-authorize the sudo cache** (`sudo -v` outside opencode-anycli,
-  then start the session within the cache TTL)
+- Files the agent creates during the session will be **root-owned**.
+  `chown -R "$USER":"$USER" .` afterwards if that bothers a
+  follow-up build.
+- The agent has full root for the session — only use this when you
+  trust its action set, and prefer running in a disposable VM /
+  container / fresh checkout when you want stronger isolation.
+- If `sudo` is not on `PATH`, the flag refuses to run with a clear
+  message instead of silently degrading.
 
-## Docker setup (for sandboxed-browser-testing skill)
-
-The oh-my-anycli `sandboxed-browser-testing` skill (`/sandbox`) requires
-Docker so browser tests run inside `mcr.microsoft.com/playwright` and
-never touch the host browser, profile, or cookies. The wrapper ships an
-auto-installer:
-
-```bash
-opencode-anycli --setup-docker          # detect distro + install + add to docker group
-opencode-anycli --setup-docker --yes    # non-interactive
-opencode-anycli --setup-docker --print  # show plan, do not write
-```
-
-What it does (Linux only):
-
-1. Detects `apt`/`dnf`/`yum`/`pacman`/`zypper` and installs `docker.io`
-   (or `docker`).
-2. `sudo systemctl enable --now docker` (when systemd is present).
-3. `sudo usermod -aG docker $USER`.
-4. Verifies with `docker info`; if the new group membership is not yet
-   active in the current shell, prints the exact follow-up:
-   `newgrp docker` (or log out / log back in).
-
-macOS short-circuits with a message — Docker on macOS requires Docker
-Desktop, Colima, or OrbStack, which the user must install themselves.
-
-If `--setup-docker` prompts for sudo passwords inside an opencode-anycli
-session (the cline subprocess often does not forward a TTY), run
-`--setup-sudo --for-docker --yes` first to whitelist the system-admin
-binaries (`usermod`, `systemctl`, `groupadd`, `tee`, `chmod`, `gpasswd`)
-under the same scoped `/etc/sudoers.d/opencode-anycli` rule.
+`opencode-anycli --doctor` reports whether `sudo` is available so the
+flag will work.
 
 ## Auto-approve (Yolo Mode)
 
