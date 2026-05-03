@@ -54,15 +54,21 @@ cd openclineclicode
 ./install.sh
 ```
 
-`opencode` and `cline` must be on your `PATH`. If they are missing the
-installer prints a clear hint and exits. To let the installer fetch them
-for you, opt in:
+`opencode` and `cline` are treated as **bundled runtime dependencies of
+openclineclicode** — if either is missing on `PATH`, the installer fetches
+it for you via `npm install -g` (no extra flag required). Conceptually,
+`openclineclicode` IS opencode + cline + our provider/config wired
+together; the three pieces just happen to ship as separate npm packages
+upstream.
 
-```bash
-./install.sh --auto-deps           # prompts before each `npm install -g`
-./install.sh --auto-deps --yes     # non-interactive (CI)
-./install.sh --auto-deps --sudo    # if your npm prefix needs sudo
-```
+Optional flags:
+
+| Flag | When to use |
+|---|---|
+| `--user` | Symlink into `~/.local/bin` instead of `/usr/local/bin` |
+| `--sudo` | Use sudo for `/usr/local/bin` symlink AND for the npm install fallback if your prefix needs root |
+| `--skip-build` | Skip the workspace build step (re-install on existing checkout) |
+| `--no-auto-deps` | Air-gap mode: fail if opencode/cline are missing instead of fetching them |
 
 After installation, run:
 

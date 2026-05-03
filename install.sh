@@ -19,25 +19,29 @@ step()  { printf "\n${BLUE}▶${RESET} %s\n" "$*"; }
 USER_INSTALL=0
 SKIP_BUILD=0
 USE_SUDO=0
-ASSUME_YES=0
-AUTO_DEPS=0
+NO_AUTO_DEPS=0
 for arg in "$@"; do
   case "$arg" in
     --user) USER_INSTALL=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --sudo) USE_SUDO=1 ;;
-    --yes|-y) ASSUME_YES=1 ;;
-    --auto-deps) AUTO_DEPS=1 ;;
+    --no-auto-deps) NO_AUTO_DEPS=1 ;;
+    --yes|-y) ;;            # accepted for backwards-compat; auto-install is now default
     -h|--help)
       cat <<EOF
-Usage: ./install.sh [--user] [--skip-build] [--sudo] [--auto-deps] [--yes]
+Usage: ./install.sh [--user] [--skip-build] [--sudo] [--no-auto-deps]
+
+  openclineclicode treats opencode + cline as bundled runtime dependencies.
+  If either is missing, this installer fetches them via npm by default —
+  no extra flag needed. The user-visible install is just:
+      git clone … && cd … && ./install.sh
 
   --user           Symlink into ~/.local/bin instead of /usr/local/bin
   --skip-build     Skip the workspace build step (assumes dist/ exists)
-  --sudo           Use sudo when symlinking to /usr/local/bin
-                   AND when auto-installing opencode/cline globally
-  --auto-deps      Offer to install missing opencode/cline with npm
-  --yes, -y        Assume yes for prompts used by --auto-deps
+  --sudo           Use sudo when symlinking to /usr/local/bin AND when
+                   auto-installing opencode/cline globally
+  --no-auto-deps   Air-gap mode: fail if opencode/cline are missing
+                   instead of running 'npm install -g'
 EOF
       exit 0 ;;
     *) err "Unknown arg: $arg"; exit 2 ;;
@@ -125,42 +129,28 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
 fi
 ok "Node v$NODE_VER"
 
-# ─── 3. opencode binary ───────────────────────────────────────────────────────
+# ─── 3. opencode binary (bundled runtime — auto-installed on demand) ─────────
 if command -v opencode >/dev/null 2>&1; then
   ok "opencode: $(opencode --version 2>&1 | head -n1)"
-elif [ "$AUTO_DEPS" -eq 1 ]; then
-  warn "opencode not found on PATH."
-  if ask_yes "Install opencode now via 'npm install -g opencode-ai'?"; then
-    auto_npm_install opencode-ai opencode "opencode" || exit 1
-  else
-    err "opencode is required. Install it manually then re-run:"
-    echo "  npm install -g opencode-ai"
-    exit 1
-  fi
-else
-  err "opencode not found on PATH."
+elif [ "$NO_AUTO_DEPS" -eq 1 ]; then
+  err "opencode not found on PATH and --no-auto-deps was specified."
   err "  Install manually: npm install -g opencode-ai"
-  err "  Or re-run this installer with --auto-deps."
   exit 1
+else
+  step "opencode is part of openclineclicode's runtime; installing it now"
+  auto_npm_install opencode-ai opencode "opencode" || exit 1
 fi
 
-# ─── 4. cline binary ──────────────────────────────────────────────────────────
+# ─── 4. cline binary (bundled runtime — auto-installed on demand) ────────────
 if command -v cline >/dev/null 2>&1; then
   ok "cline: $(cline --version 2>&1 | head -n1)"
-elif [ "$AUTO_DEPS" -eq 1 ]; then
-  warn "cline not found on PATH."
-  if ask_yes "Install cline now via 'npm install -g cline'?"; then
-    auto_npm_install cline cline "cline" || exit 1
-  else
-    err "cline is required. Install it manually then re-run:"
-    echo "  npm install -g cline"
-    exit 1
-  fi
-else
-  err "cline not found on PATH."
+elif [ "$NO_AUTO_DEPS" -eq 1 ]; then
+  err "cline not found on PATH and --no-auto-deps was specified."
   err "  Install manually: npm install -g cline"
-  err "  Or re-run this installer with --auto-deps."
   exit 1
+else
+  step "cline is part of openclineclicode's runtime; installing it now"
+  auto_npm_install cline cline "cline" || exit 1
 fi
 
 if [ ! -f "$HOME/.cline/data/globalState.json" ]; then
