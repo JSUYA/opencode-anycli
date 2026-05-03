@@ -19,23 +19,87 @@ step()  { printf "\n${BLUE}▶${RESET} %s\n" "$*"; }
 USER_INSTALL=0
 SKIP_BUILD=0
 USE_SUDO=0
+ASSUME_YES=0
+AUTO_DEPS=0
 for arg in "$@"; do
   case "$arg" in
     --user) USER_INSTALL=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --sudo) USE_SUDO=1 ;;
+    --yes|-y) ASSUME_YES=1 ;;
+    --auto-deps) AUTO_DEPS=1 ;;
     -h|--help)
       cat <<EOF
-Usage: ./install.sh [--user] [--skip-build] [--sudo]
+Usage: ./install.sh [--user] [--skip-build] [--sudo] [--auto-deps] [--yes]
 
-  --user        Symlink into ~/.local/bin instead of /usr/local/bin
-  --skip-build  Skip the workspace build step (assumes dist/ exists)
-  --sudo        Use sudo when symlinking to /usr/local/bin
+  --user           Symlink into ~/.local/bin instead of /usr/local/bin
+  --skip-build     Skip the workspace build step (assumes dist/ exists)
+  --sudo           Use sudo when symlinking to /usr/local/bin
+                   AND when auto-installing opencode/cline globally
+  --auto-deps      Offer to install missing opencode/cline with npm
+  --yes, -y        Assume yes for prompts used by --auto-deps
 EOF
       exit 0 ;;
     *) err "Unknown arg: $arg"; exit 2 ;;
   esac
 done
+
+# ─── Helper: prompt, default-no ───────────────────────────────────────────────
+ask_yes() {
+  # ask_yes "<question>" - returns 0 (yes) or 1 (no). Default = no on Enter.
+  # Auto-yes if --yes was passed. Auto-no if stdin is not a tty (CI).
+  if [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
+  if [ ! -t 0 ]; then return 1; fi
+  printf "${YELLOW}?${RESET} %s [y/N] " "$1"
+  read -r reply
+  case "$reply" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+# ─── Helper: install a global npm package (opencode-ai / cline) ───────────────
+auto_npm_install() {
+  # auto_npm_install <pkg> <bin-name> <human-label>
+  local pkg="$1" bin_name="$2" label="$3"
+  if ! command -v npm >/dev/null 2>&1; then
+    err "npm is required to auto-install $label but is not on PATH."
+    err "  Install Node + npm first (Node 20+), then re-run this script."
+    return 1
+  fi
+  local log_file
+  log_file="$(mktemp -t openclineclicode-npm.XXXXXX)"
+  info "Running: npm install -g $pkg"
+  if [ "$USE_SUDO" -eq 1 ]; then
+    if sudo npm install -g "$pkg"; then : ; else
+      err "sudo npm install -g $pkg failed."
+      rm -f "$log_file"
+      return 1
+    fi
+  else
+    if npm install -g "$pkg" 2>&1 | tee "$log_file"; then
+      :
+    else
+      if grep -qE "EACCES|permission denied" "$log_file" 2>/dev/null; then
+        warn "npm reported a permission error. Re-running with sudo..."
+        if sudo npm install -g "$pkg"; then : ; else
+          err "sudo npm install -g $pkg also failed."
+          rm -f "$log_file"
+          return 1
+        fi
+      else
+        err "npm install -g $pkg failed (see output above)."
+        rm -f "$log_file"
+        return 1
+      fi
+    fi
+  fi
+  rm -f "$log_file"
+  if ! command -v "$bin_name" >/dev/null 2>&1; then
+    err "$label installed but $bin_name still not on PATH."
+    err "  Check 'npm bin -g' and ensure that directory is in PATH."
+    return 1
+  fi
+  ok "$label installed: $($bin_name --version 2>&1 | head -n1)"
+  return 0
+}
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -62,36 +126,42 @@ fi
 ok "Node v$NODE_VER"
 
 # ─── 3. opencode binary ───────────────────────────────────────────────────────
-if ! command -v opencode >/dev/null 2>&1; then
+if command -v opencode >/dev/null 2>&1; then
+  ok "opencode: $(opencode --version 2>&1 | head -n1)"
+elif [ "$AUTO_DEPS" -eq 1 ]; then
+  warn "opencode not found on PATH."
+  if ask_yes "Install opencode now via 'npm install -g opencode-ai'?"; then
+    auto_npm_install opencode-ai opencode "opencode" || exit 1
+  else
+    err "opencode is required. Install it manually then re-run:"
+    echo "  npm install -g opencode-ai"
+    exit 1
+  fi
+else
   err "opencode not found on PATH."
-  cat <<EOF
-
-  Install opencode first:
-    npm install -g opencode-ai
-
-  If global npm install fails, use the opencode release binary:
-    https://github.com/sst/opencode/releases
-
-EOF
+  err "  Install manually: npm install -g opencode-ai"
+  err "  Or re-run this installer with --auto-deps."
   exit 1
 fi
-ok "opencode: $(opencode --version 2>&1 | head -n1)"
 
 # ─── 4. cline binary ──────────────────────────────────────────────────────────
-if ! command -v cline >/dev/null 2>&1; then
+if command -v cline >/dev/null 2>&1; then
+  ok "cline: $(cline --version 2>&1 | head -n1)"
+elif [ "$AUTO_DEPS" -eq 1 ]; then
+  warn "cline not found on PATH."
+  if ask_yes "Install cline now via 'npm install -g cline'?"; then
+    auto_npm_install cline cline "cline" || exit 1
+  else
+    err "cline is required. Install it manually then re-run:"
+    echo "  npm install -g cline"
+    exit 1
+  fi
+else
   err "cline not found on PATH."
-  cat <<EOF
-
-  Install cline first:
-    npm install -g cline
-
-  After installation, run cline once to configure your model and credentials.
-  Settings are stored in ~/.cline/data/globalState.json.
-
-EOF
+  err "  Install manually: npm install -g cline"
+  err "  Or re-run this installer with --auto-deps."
   exit 1
 fi
-ok "cline: $(cline --version 2>&1 | head -n1)"
 
 if [ ! -f "$HOME/.cline/data/globalState.json" ]; then
   warn "~/.cline/data/globalState.json not found; run cline once to finish setup."
