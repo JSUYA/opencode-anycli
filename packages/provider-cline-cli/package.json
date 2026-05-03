@@ -7,11 +7,11 @@
   "author": "Project Maintainers",
   "repository": {
     "type": "git",
-    "url": "git+https://example.invalid/openclineclicode.git",
+    "url": "git+https://github.com/JSUYA/openclineclicode.git",
     "directory": "packages/provider-cline-cli"
   },
-  "homepage": "https://example.invalid/openclineclicode/tree/main/packages/provider-cline-cli#readme",
-  "bugs": "https://example.invalid/openclineclicode/issues",
+  "homepage": "https://github.com/JSUYA/openclineclicode/tree/main/packages/provider-cline-cli#readme",
+  "bugs": "https://github.com/JSUYA/openclineclicode/issues",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

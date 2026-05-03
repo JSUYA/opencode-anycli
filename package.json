@@ -8,10 +8,10 @@
   "author": "Project Maintainers",
   "repository": {
     "type": "git",
-    "url": "git+https://example.invalid/openclineclicode.git"
+    "url": "git+https://github.com/JSUYA/openclineclicode.git"
   },
-  "homepage": "https://example.invalid/openclineclicode#readme",
-  "bugs": "https://example.invalid/openclineclicode/issues",
+  "homepage": "https://github.com/JSUYA/openclineclicode#readme",
+  "bugs": "https://github.com/JSUYA/openclineclicode/issues",
   "workspaces": [
     "packages/*"
   ],

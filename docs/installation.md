@@ -14,7 +14,7 @@ This guide installs openclineclicode so opencode can run through the local cline
 ## Quick Install
 
 ```bash
-git clone https://example.invalid/openclineclicode.git
+git clone https://github.com/JSUYA/openclineclicode.git
 cd openclineclicode
 ./install.sh
 ```
