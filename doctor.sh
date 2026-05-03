@@ -17,7 +17,7 @@ warn() { printf "  ${YELLOW}⚠${RESET} %s\n" "$*"; }
 section() { printf "\n${BLUE}▶ %s${RESET}\n" "$*"; }
 
 printf "${BLUE}openclineclicode doctor${RESET}\n"
-printf "${DIM}진단 보고서 — %s${RESET}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+printf "${DIM}Diagnostic report - %s${RESET}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
 
 # ─── Node ─────────────────────────────────────────────────────────────────────
 section "Node.js"
@@ -56,7 +56,7 @@ else
 fi
 
 # ─── cline config ─────────────────────────────────────────────────────────────
-section "cline 설정 / config"
+section "cline configuration / config"
 GS="$HOME/.cline/data/globalState.json"
 if [ -f "$GS" ]; then
   if node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$GS" >/dev/null 2>&1; then
@@ -74,7 +74,7 @@ else
 fi
 
 # ─── openclineclicode config ──────────────────────────────────────────────────
-section "openclineclicode 설정 / config"
+section "openclineclicode configuration / config"
 OCC="$HOME/.config/openclineclicode/opencode/opencode.json"
 if [ -f "$OCC" ]; then
   if node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$OCC" >/dev/null 2>&1; then
@@ -117,10 +117,10 @@ fi
 # ─── Summary ──────────────────────────────────────────────────────────────────
 printf "\n"
 if [ "$FAIL" -eq 0 ]; then
-  printf "${GREEN}모두 통과 / All checks passed (%d).${RESET}\n" "$PASS"
+  printf "${GREEN}All checks passed (%d).${RESET}\n" "$PASS"
   exit 0
 else
-  printf "${RED}실패 %d개 / %d failures, %d passed.${RESET}\n" "$FAIL" "$FAIL" "$PASS"
-  printf "${DIM}자세한 도움말은 docs/troubleshooting.md 를 참고하세요.${RESET}\n"
+  printf "${RED}%d failures, %d passed.${RESET}\n" "$FAIL" "$PASS"
+  printf "${DIM}See docs/troubleshooting.md for help.${RESET}\n"
   exit 1
 fi

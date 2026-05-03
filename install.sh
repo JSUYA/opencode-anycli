@@ -40,7 +40,7 @@ done
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ─── 1. Detect OS ─────────────────────────────────────────────────────────────
-step "환경 감지 / Detecting environment"
+step "Detecting environment"
 OS_NAME="$(uname -s)"
 case "$OS_NAME" in
   Darwin) ok "OS: macOS" ;;
@@ -66,10 +66,10 @@ if ! command -v opencode >/dev/null 2>&1; then
   err "opencode not found on PATH."
   cat <<EOF
 
-  설치하세요 / Install opencode first:
+  Install opencode first:
     npm install -g opencode-ai
 
-  npm 글로벌 설치가 실패한다면 opencode 저장소의 binary tarball을 사용할 수 있습니다:
+  If global npm install fails, use the opencode release binary:
     https://github.com/sst/opencode/releases
 
 EOF
@@ -82,11 +82,11 @@ if ! command -v cline >/dev/null 2>&1; then
   err "cline not found on PATH."
   cat <<EOF
 
-  설치하세요 / Install cline first:
+  Install cline first:
     npm install -g cline
 
-  설치 후 cline을 한 번 실행해 모델과 인증 정보를 설정하세요 (cline의 첫 실행 가이드 참고).
-  설정은 ~/.cline/data/globalState.json 에 저장됩니다.
+  After installation, run cline once to configure your model and credentials.
+  Settings are stored in ~/.cline/data/globalState.json.
 
 EOF
   exit 1
@@ -94,25 +94,25 @@ fi
 ok "cline: $(cline --version 2>&1 | head -n1)"
 
 if [ ! -f "$HOME/.cline/data/globalState.json" ]; then
-  warn "~/.cline/data/globalState.json 이 없습니다 — cline 을 먼저 한 번 실행해서 설정을 마치세요."
+  warn "~/.cline/data/globalState.json not found; run cline once to finish setup."
 fi
 
 # ─── 5. Build the provider ────────────────────────────────────────────────────
 if [ "$SKIP_BUILD" -eq 0 ]; then
-  step "빌드 / Building workspaces (this may take a minute on slow network links)"
+  step "Building workspaces"
   cd "$REPO_DIR"
   if command -v bun >/dev/null 2>&1; then
-    info "bun 발견 — bun install + build 사용"
+    info "bun found; using bun install + build"
     bun install
     bun run build
   else
-    info "npm 사용 (bun 없음)"
+    info "Using npm because bun is unavailable"
     npm install --workspaces --include-workspace-root
     npm run build --workspaces --if-present
   fi
   ok "Build complete"
 else
-  warn "--skip-build 가 지정되어 빌드를 건너뜁니다."
+  warn "--skip-build set; skipping build."
 fi
 
 # ─── 6. Copy default config ───────────────────────────────────────────────────
@@ -120,7 +120,7 @@ fi
 # at spawn time, so opencode auto-discovers commands/agents/skills under
 # $HOME/.config/openclineclicode/opencode/. The opencode.json must therefore
 # live one directory deeper than the wrapper's XDG dir.
-step "기본 설정 / Installing default opencode.json"
+step "Installing default opencode.json"
 CONFIG_DIR="$HOME/.config/openclineclicode/opencode"
 mkdir -p "$CONFIG_DIR"
 TARGET="$CONFIG_DIR/opencode.json"
@@ -128,13 +128,13 @@ SOURCE="$REPO_DIR/templates/opencode.json"
 PROVIDER_DIST="$REPO_DIR/packages/provider-cline-cli/dist/index.js"
 if [ ! -f "$PROVIDER_DIST" ]; then
   err "Provider dist not found: $PROVIDER_DIST"
-  err "빌드를 먼저 실행하세요. (--skip-build 없이 ./install.sh 다시 실행)"
+  err "Run ./install.sh without --skip-build to build first."
   exit 1
 fi
 if [ -f "$TARGET" ]; then
   BACKUP="$TARGET.bak.$(date +%s)"
   cp "$TARGET" "$BACKUP"
-  warn "기존 설정 백업: $BACKUP"
+  warn "Existing config backed up: $BACKUP"
 fi
 # Substitute the file:// path so opencode loads the local build instead of trying npm.
 # Uses '|' as sed delimiter because the path contains '/'.
@@ -151,7 +151,7 @@ if [ ! -f "$AGENTS_TARGET" ]; then
 fi
 
 # ─── 7. Symlink the CLI ───────────────────────────────────────────────────────
-step "심볼릭 링크 / Linking openclineclicode binary"
+step "Linking openclineclicode binary"
 BIN_SRC="$REPO_DIR/packages/cli/bin/openclineclicode"
 chmod +x "$BIN_SRC" || true
 
@@ -162,7 +162,7 @@ if [ "$USER_INSTALL" -eq 1 ]; then
   ok "Linked to $TARGET_DIR/openclineclicode"
   case ":$PATH:" in
     *":$TARGET_DIR:"*) : ;;
-    *) warn "$TARGET_DIR 이 PATH에 없습니다. ~/.zshrc 또는 ~/.bashrc 에 추가하세요:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    *) warn "$TARGET_DIR is not in PATH. Add this to your shell profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
   esac
 else
   TARGET_DIR="/usr/local/bin"
@@ -173,8 +173,8 @@ else
     sudo ln -sf "$BIN_SRC" "$TARGET_DIR/openclineclicode"
     ok "Linked to $TARGET_DIR/openclineclicode (sudo)"
   else
-    warn "$TARGET_DIR 에 쓰기 권한이 없습니다."
-    info "다시 실행: ./install.sh --user   (또는 --sudo)"
+    warn "$TARGET_DIR is not writable."
+    info "Re-run with ./install.sh --user or ./install.sh --sudo."
     exit 1
   fi
 fi
@@ -182,12 +182,12 @@ fi
 # ─── 8. Next steps ────────────────────────────────────────────────────────────
 cat <<EOF
 
-${GREEN}설치 완료 / Installation complete${RESET}
+${GREEN}installation complete / Installation complete${RESET}
 
-  1) 진단 실행 / Run the doctor:        ${BLUE}openclineclicode --doctor${RESET}
-  2) opencode TUI 시작 / Start opencode: ${BLUE}openclineclicode${RESET}
-  3) 설정 수정 / Edit config:           ${BLUE}\$EDITOR $TARGET${RESET}
-  4) 문제 발생 시 / Troubleshooting:    ${BLUE}docs/troubleshooting.md${RESET}
-  5) 다른 mode 시도 / Try passthrough:  ${BLUE}docs/provider-modes.md${RESET}
+  1) Run diagnostics:        ${BLUE}openclineclicode --doctor${RESET}
+  2) Start opencode:         ${BLUE}openclineclicode${RESET}
+  3) Edit config:            ${BLUE}\$EDITOR $TARGET${RESET}
+  4) Troubleshooting:        ${BLUE}docs/troubleshooting.md${RESET}
+  5) Try passthrough later:  ${BLUE}docs/provider-modes.md${RESET}
 
 EOF
