@@ -4,8 +4,12 @@
 set -e
 
 # ─── Color helpers ────────────────────────────────────────────────────────────
-if [ -t 1 ]; then
-  GREEN="\033[1;32m"; YELLOW="\033[1;33m"; RED="\033[1;31m"; BLUE="\033[1;34m"; DIM="\033[2m"; RESET="\033[0m"
+# Use $'...' literals so the escape bytes are baked into the variable at
+# definition time. This way ${GREEN} expands correctly inside cat <<EOF,
+# echo, and printf uniformly. Raw "\033[..." strings would only render
+# correctly via printf and would print as literal text from heredocs / echo.
+if [ -t 1 ] && [ "${NO_COLOR:-0}" != "1" ]; then
+  GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[1;31m'; BLUE=$'\033[1;34m'; DIM=$'\033[2m'; RESET=$'\033[0m'
 else
   GREEN=""; YELLOW=""; RED=""; BLUE=""; DIM=""; RESET=""
 fi
