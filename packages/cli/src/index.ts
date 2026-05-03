@@ -11,10 +11,11 @@
 import { spawn, spawnSync } from "node:child_process"
 import { dirname, resolve as pathResolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { existsSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import { resolveConfig, defaultConfigPath } from "./config.js"
 import { checkOpencode, checkCline } from "./ensure-opencode.js"
+import { materializeAutoApproveConfig } from "./auto-approve.js"
 
 const VERSION = "0.1.0"
 
@@ -24,6 +25,7 @@ interface Args {
   doctor?: boolean | undefined
   version?: boolean | undefined
   help?: boolean | undefined
+  autoApprove?: boolean | undefined
   passthrough: string[]
 }
 
@@ -49,9 +51,18 @@ function parseArgs(argv: readonly string[]): Args {
       case "-h":
         out.help = true
         break
+      case "--auto-approve":
+      case "--yolo":
+      case "-y":
+        out.autoApprove = true
+        break
       default:
         out.passthrough.push(a)
     }
+  }
+  // OPENCODE_ANYCLI_AUTO_APPROVE=1 is equivalent to --auto-approve.
+  if (process.env["OPENCODE_ANYCLI_AUTO_APPROVE"] === "1") {
+    out.autoApprove = true
   }
   return out
 }
@@ -65,18 +76,27 @@ Usage:
   opencode-anycli [flags] [...opencode-args]
 
 Flags:
-  --config <path>   Use a specific opencode.json (default: ${defaultConfigPath()})
-  --init            (Re)create the default config from the bundled template
-  --doctor          Run the diagnostic script and exit
-  --version, -V     Print version and exit
-  --help, -h        Print this help and exit
+  --config <path>          Use a specific opencode.json (default: ${defaultConfigPath()})
+  --init                   (Re)create the default config from the bundled template
+  --doctor                 Run the diagnostic script and exit
+  --auto-approve, --yolo, -y
+                           Materialize a temp config that sets every opencode
+                           permission (read/edit/bash/external_directory/...)
+                           to "allow" for the spawned session. The cline
+                           subprocess already runs with --yolo, so this flag
+                           propagates auto-approve to the OUTER opencode
+                           layer too. Per-key user-set "deny" rules in your
+                           own config are still honored.
+  --version, -V            Print version and exit
+  --help, -h               Print this help and exit
 
 Anything not listed above is passed through to opencode unchanged.
 
 Environment:
-  OPENCODE_ANYCLI_CLINE_BIN   Override path to the cline binary
-  OPENCODE_ANYCLI_CONFIG      Override config file path
-  DEBUG=1                      Print cline NDJSON events to stderr
+  OPENCODE_ANYCLI_CLINE_BIN     Override path to the cline binary
+  OPENCODE_ANYCLI_CONFIG        Override config file path
+  OPENCODE_ANYCLI_AUTO_APPROVE  Set to "1" to imply --auto-approve
+  DEBUG=1                       Print cline NDJSON events to stderr
 `)
 }
 
@@ -138,7 +158,32 @@ async function main(): Promise<void> {
     return
   }
 
-  // Spawn opencode with OPENCODE_CONFIG pointing at our resolved file.
+  // If --auto-approve / --yolo / OPENCODE_ANYCLI_AUTO_APPROVE=1, materialize
+  // a temp config that adds "allow" rules for every documented opencode
+  // permission. The original cfg.path is left untouched. We schedule cleanup
+  // of the temp file on process exit.
+  let configPathForOpencode = cfg.path
+  let cleanupPath: string | null = null
+  if (args.autoApprove) {
+    configPathForOpencode = materializeAutoApproveConfig(cfg.path)
+    cleanupPath = configPathForOpencode
+    process.stderr.write(
+      `opencode-anycli: auto-approve enabled (temp config: ${configPathForOpencode})\n`,
+    )
+    const cleanup = () => {
+      if (cleanupPath) {
+        try { rmSync(cleanupPath, { force: true }) } catch { /* ignore */ }
+        try { rmSync(dirname(cleanupPath), { recursive: true, force: true }) } catch { /* ignore */ }
+        cleanupPath = null
+      }
+    }
+    process.on("exit", cleanup)
+    process.on("SIGINT", () => { cleanup(); process.exit(130) })
+    process.on("SIGTERM", () => { cleanup(); process.exit(143) })
+  }
+
+  // Spawn opencode with OPENCODE_CONFIG pointing at our resolved file
+  // (or the auto-approve temp file when applicable).
   // Also set XDG_CONFIG_HOME so opencode auto-discovers our wrapper-private
   // commands/agents/skills in ~/.config/opencode-anycli/opencode/ instead of
   // the user's primary ~/.config/opencode/. The user can still override by
@@ -154,12 +199,18 @@ async function main(): Promise<void> {
   //       reach, and
   //   (c) it removes one external network call from the wrapper's footprint.
   // The user can opt back in by exporting OPENCODE_DISABLE_MODELS_FETCH=0.
+  //
+  // OPENCODE_ANYCLI_AUTO_APPROVE: forwarded as a hint to the cline-cli
+  // provider. The provider already passes --yolo to cline, so this is mainly
+  // informational, but downstream code (e.g. doctor, future tooling) can key
+  // off it to know auto-approve is in effect for this session.
   // Inherit stdio so the TUI works.
   const env = {
     ...process.env,
-    OPENCODE_CONFIG: cfg.path,
+    OPENCODE_CONFIG: configPathForOpencode,
     XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] || `${homedir()}/.config/opencode-anycli`,
     OPENCODE_DISABLE_MODELS_FETCH: process.env["OPENCODE_DISABLE_MODELS_FETCH"] ?? "1",
+    ...(args.autoApprove ? { OPENCODE_ANYCLI_AUTO_APPROVE: "1" } : {}),
   }
   const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
   child.on("close", (code, signal) => {
