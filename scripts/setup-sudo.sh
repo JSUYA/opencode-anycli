@@ -26,11 +26,17 @@ set -euo pipefail
 ASSUME_YES=0
 REMOVE=0
 PRINT_ONLY=0
+FOR_DOCKER=0
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) ASSUME_YES=1 ;;
     --remove) REMOVE=1 ;;
     --print)  PRINT_ONLY=1 ;;
+    --for-docker)
+      # Also include the system-admin commands needed to install Docker
+      # and add the user to the docker group: usermod, groupadd, systemctl,
+      # tee (for systemd unit edits), and chmod (for socket perms).
+      FOR_DOCKER=1 ;;
     -h|--help)
       sed -n '3,28p' "$0"
       exit 0 ;;
@@ -117,6 +123,20 @@ fi
 if [ -z "$PMS" ]; then
   printf "%b✗%b Detected %s but found no package-manager binaries on PATH.\n" "$R" "$N" "$DISTRO"
   exit 1
+fi
+
+# --for-docker: also append system-admin commands needed for Docker install
+# + user-group add + systemd start. Each binary is resolved through `command
+# -v` so we only NOPASSWD entries that actually exist on this machine.
+DOCKER_CMDS=""
+if [ "$FOR_DOCKER" -eq 1 ]; then
+  for c in usermod groupadd systemctl tee chmod gpasswd; do
+    p="$(command -v "$c" 2>/dev/null || true)"
+    [ -n "$p" ] && DOCKER_CMDS="${DOCKER_CMDS:+$DOCKER_CMDS, }$p"
+  done
+  if [ -n "$DOCKER_CMDS" ]; then
+    PMS="${PMS}, ${DOCKER_CMDS}"
+  fi
 fi
 
 # Build the sudoers content.

@@ -125,6 +125,9 @@ opencode-anycli --setup-sudo            # auto-detect distro + interactive confi
 opencode-anycli --setup-sudo --yes      # apply without prompt (CI / fresh box)
 opencode-anycli --setup-sudo --print    # show what would be applied, do not write
 opencode-anycli --setup-sudo --remove   # remove the rule
+opencode-anycli --setup-sudo --for-docker --yes   # also whitelist usermod / systemctl /
+                                                  # groupadd / tee / chmod / gpasswd so
+                                                  # `--setup-docker` runs unattended
 ```
 
 It detects your package manager (`apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`),
@@ -141,6 +144,38 @@ Other workarounds for non-package-manager prompts (covered in oh-my-anycli's
 - **`SUDO_ASKPASS` helper** (GUI password prompt — useful for `ssh-add`)
 - **Pre-authorize the sudo cache** (`sudo -v` outside opencode-anycli,
   then start the session within the cache TTL)
+
+## Docker setup (for sandboxed-browser-testing skill)
+
+The oh-my-anycli `sandboxed-browser-testing` skill (`/sandbox`) requires
+Docker so browser tests run inside `mcr.microsoft.com/playwright` and
+never touch the host browser, profile, or cookies. The wrapper ships an
+auto-installer:
+
+```bash
+opencode-anycli --setup-docker          # detect distro + install + add to docker group
+opencode-anycli --setup-docker --yes    # non-interactive
+opencode-anycli --setup-docker --print  # show plan, do not write
+```
+
+What it does (Linux only):
+
+1. Detects `apt`/`dnf`/`yum`/`pacman`/`zypper` and installs `docker.io`
+   (or `docker`).
+2. `sudo systemctl enable --now docker` (when systemd is present).
+3. `sudo usermod -aG docker $USER`.
+4. Verifies with `docker info`; if the new group membership is not yet
+   active in the current shell, prints the exact follow-up:
+   `newgrp docker` (or log out / log back in).
+
+macOS short-circuits with a message — Docker on macOS requires Docker
+Desktop, Colima, or OrbStack, which the user must install themselves.
+
+If `--setup-docker` prompts for sudo passwords inside an opencode-anycli
+session (the cline subprocess often does not forward a TTY), run
+`--setup-sudo --for-docker --yes` first to whitelist the system-admin
+binaries (`usermod`, `systemctl`, `groupadd`, `tee`, `chmod`, `gpasswd`)
+under the same scoped `/etc/sudoers.d/opencode-anycli` rule.
 
 ## Auto-approve (Yolo Mode)
 

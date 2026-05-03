@@ -25,6 +25,7 @@ interface Args {
   doctor?: boolean | undefined
   update?: boolean | undefined
   setupSudo?: boolean | undefined
+  setupDocker?: boolean | undefined
   version?: boolean | undefined
   help?: boolean | undefined
   autoApprove?: boolean | undefined
@@ -55,8 +56,14 @@ function parseArgs(argv: readonly string[]): Args {
         break
       case "--setup-sudo":
         // Anything after --setup-sudo is forwarded to setup-sudo.sh
-        // (e.g. --yes, --remove, --print).
+        // (e.g. --yes, --remove, --print, --for-docker).
         out.setupSudo = true
+        out.passthrough.push(...argv.slice(i + 1))
+        i = argv.length
+        break
+      case "--setup-docker":
+        // Forwards to setup-docker.sh: install + group + start + verify.
+        out.setupDocker = true
         out.passthrough.push(...argv.slice(i + 1))
         i = argv.length
         break
@@ -120,10 +127,23 @@ Flags:
                            can run package installs without password
                            prompts (which the agent cannot answer through
                            the cline subprocess). Forwarded args:
-                             --yes      apply without confirm
-                             --print    show what would be applied
-                             --remove   remove the rule
+                             --yes          apply without confirm
+                             --print        show what would be applied
+                             --remove       remove the rule
+                             --for-docker   also include usermod / systemctl
+                                            / groupadd / tee / chmod / gpasswd
+                                            so Docker setup helpers also run
+                                            without password
                            macOS short-circuits with a no-op + advice.
+  --setup-docker […setup-docker.sh args]
+                           Linux: install Docker via the system package
+                           manager, enable + start dockerd via systemd,
+                           add the current user to the docker group,
+                           and verify with 'docker info'. Forwarded args:
+                             --yes     non-interactive
+                             --print   show plan, do not apply
+                           macOS short-circuits with brew/colima/orbstack
+                           guidance (Docker on macOS is GUI / VM-managed).
   --auto-approve, --yolo, -y
                            Materialize a temp config that sets every opencode
                            permission (read/edit/bash/external_directory/...)
@@ -192,21 +212,26 @@ function runUpdate(installArgs: string[]): never {
 }
 
 function runSetupSudo(extraArgs: string[]): never {
-  // setup-sudo.sh lives at <repo>/scripts/setup-sudo.sh.
-  // We locate the install.sh first to find the repo root, then resolve
-  // the script path relative to it.
+  runRepoScript("scripts/setup-sudo.sh", extraArgs)
+}
+
+function runSetupDocker(extraArgs: string[]): never {
+  runRepoScript("scripts/setup-docker.sh", extraArgs)
+}
+
+function runRepoScript(relPath: string, extraArgs: string[]): never {
   const installScript = locateRepoArtifact("install.sh")
   if (!installScript) {
-    process.stderr.write("install.sh not found in this checkout — cannot find scripts/setup-sudo.sh.\n")
+    process.stderr.write(`install.sh not found in this checkout — cannot find ${relPath}.\n`)
     process.exit(2)
   }
   const repoDir = dirname(installScript)
-  const setupScript = pathResolve(repoDir, "scripts", "setup-sudo.sh")
-  if (!existsSync(setupScript)) {
-    process.stderr.write(`setup-sudo.sh not found at ${setupScript}\n`)
+  const scriptPath = pathResolve(repoDir, relPath)
+  if (!existsSync(scriptPath)) {
+    process.stderr.write(`${relPath} not found at ${scriptPath}\n`)
     process.exit(2)
   }
-  const r = spawnSync("bash", [setupScript, ...extraArgs], { stdio: "inherit", cwd: repoDir })
+  const r = spawnSync("bash", [scriptPath, ...extraArgs], { stdio: "inherit", cwd: repoDir })
   process.exit(r.status ?? 1)
 }
 
@@ -241,6 +266,9 @@ async function main(): Promise<void> {
   }
   if (args.setupSudo) {
     runSetupSudo(args.passthrough)
+  }
+  if (args.setupDocker) {
+    runSetupDocker(args.passthrough)
   }
 
   // Pre-flight checks. Fail fast with friendly hints.
