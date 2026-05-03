@@ -158,7 +158,17 @@ if [ ! -f "$HOME/.cline/data/globalState.json" ]; then
 fi
 
 # ─── 5. Build the provider ────────────────────────────────────────────────────
-if [ "$SKIP_BUILD" -eq 0 ]; then
+PROVIDER_DIST_CHECK="$REPO_DIR/packages/provider-cline-cli/dist/index.js"
+CLI_DIST_CHECK="$REPO_DIR/packages/cli/dist/index.js"
+if [ "$SKIP_BUILD" -eq 1 ]; then
+  warn "--skip-build set; skipping build."
+elif [ -f "$PROVIDER_DIST_CHECK" ] && [ -f "$CLI_DIST_CHECK" ] \
+     && [ -d "$REPO_DIR/node_modules" ] \
+     && [ "$PROVIDER_DIST_CHECK" -nt "$REPO_DIR/packages/provider-cline-cli/src/index.ts" ] \
+     && [ "$CLI_DIST_CHECK" -nt "$REPO_DIR/packages/cli/src/index.ts" ]; then
+  step "Build artifacts already present and newer than sources; skipping build"
+  info "Pass --rebuild to force a rebuild (not yet implemented; remove dist/ + node_modules/ to force)"
+else
   step "Building workspaces"
   cd "$REPO_DIR"
   if command -v bun >/dev/null 2>&1; then
@@ -171,8 +181,6 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
     npm run build --workspaces --if-present
   fi
   ok "Build complete"
-else
-  warn "--skip-build set; skipping build."
 fi
 
 # ─── 6. Copy default config ───────────────────────────────────────────────────
@@ -191,17 +199,24 @@ if [ ! -f "$PROVIDER_DIST" ]; then
   err "Run ./install.sh without --skip-build to build first."
   exit 1
 fi
-if [ -f "$TARGET" ]; then
-  BACKUP="$TARGET.bak.$(date +%s)"
-  cp "$TARGET" "$BACKUP"
-  warn "Existing config backed up: $BACKUP"
-fi
-# Substitute the file:// path so opencode loads the local build instead of trying npm.
-# Uses '|' as sed delimiter because the path contains '/'.
-sed "s|__OPENCLINECLICODE_PROVIDER_DIST__|${PROVIDER_DIST}|g" "$SOURCE" > "$TARGET"
-ok "Config installed: $TARGET"
 note_path() { printf "  ${DIM}↳ provider dist: %s${RESET}\n" "$*"; }
-note_path "$PROVIDER_DIST"
+# Idempotent: if the existing config already substitutes to the current
+# PROVIDER_DIST path, skip the write entirely (no .bak file proliferation).
+# Compare against what we would have written.
+EXPECTED="$(sed "s|__OPENCLINECLICODE_PROVIDER_DIST__|${PROVIDER_DIST}|g" "$SOURCE")"
+if [ -f "$TARGET" ] && [ "$(cat "$TARGET")" = "$EXPECTED" ]; then
+  ok "Config already up-to-date: $TARGET"
+  note_path "$PROVIDER_DIST"
+else
+  if [ -f "$TARGET" ]; then
+    BACKUP="$TARGET.bak.$(date +%s)"
+    cp "$TARGET" "$BACKUP"
+    warn "Existing config differs; previous version backed up: $BACKUP"
+  fi
+  printf '%s\n' "$EXPECTED" > "$TARGET"
+  ok "Config installed: $TARGET"
+  note_path "$PROVIDER_DIST"
+fi
 
 # AGENTS.md template
 AGENTS_TARGET="$CONFIG_DIR/AGENTS.md"
@@ -215,11 +230,27 @@ step "Linking openclineclicode binary"
 BIN_SRC="$REPO_DIR/packages/cli/bin/openclineclicode"
 chmod +x "$BIN_SRC" || true
 
+# Idempotent symlink helper: skip if the symlink already points where we want.
+ensure_symlink() {
+  # ensure_symlink <target_path> <use_sudo:0|1>
+  local target="$1" use_sudo="$2"
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$BIN_SRC" ]; then
+    ok "Already linked: $target -> $BIN_SRC"
+    return 0
+  fi
+  if [ "$use_sudo" -eq 1 ]; then
+    sudo ln -sf "$BIN_SRC" "$target"
+    ok "Linked to $target (sudo)"
+  else
+    ln -sf "$BIN_SRC" "$target"
+    ok "Linked to $target"
+  fi
+}
+
 if [ "$USER_INSTALL" -eq 1 ]; then
   TARGET_DIR="$HOME/.local/bin"
   mkdir -p "$TARGET_DIR"
-  ln -sf "$BIN_SRC" "$TARGET_DIR/openclineclicode"
-  ok "Linked to $TARGET_DIR/openclineclicode"
+  ensure_symlink "$TARGET_DIR/openclineclicode" 0
   case ":$PATH:" in
     *":$TARGET_DIR:"*) : ;;
     *) warn "$TARGET_DIR is not in PATH. Add this to your shell profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
@@ -227,11 +258,9 @@ if [ "$USER_INSTALL" -eq 1 ]; then
 else
   TARGET_DIR="/usr/local/bin"
   if [ -w "$TARGET_DIR" ]; then
-    ln -sf "$BIN_SRC" "$TARGET_DIR/openclineclicode"
-    ok "Linked to $TARGET_DIR/openclineclicode"
+    ensure_symlink "$TARGET_DIR/openclineclicode" 0
   elif [ "$USE_SUDO" -eq 1 ]; then
-    sudo ln -sf "$BIN_SRC" "$TARGET_DIR/openclineclicode"
-    ok "Linked to $TARGET_DIR/openclineclicode (sudo)"
+    ensure_symlink "$TARGET_DIR/openclineclicode" 1
   else
     warn "$TARGET_DIR is not writable."
     info "Re-run with ./install.sh --user or ./install.sh --sudo."
