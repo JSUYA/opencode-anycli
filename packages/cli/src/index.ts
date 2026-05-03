@@ -24,6 +24,7 @@ interface Args {
   init?: boolean | undefined
   doctor?: boolean | undefined
   update?: boolean | undefined
+  setupSudo?: boolean | undefined
   version?: boolean | undefined
   help?: boolean | undefined
   autoApprove?: boolean | undefined
@@ -49,6 +50,13 @@ function parseArgs(argv: readonly string[]): Args {
         // Everything AFTER --update is forwarded to install.sh as-is, so the
         // user can run `opencode-anycli --update --user --skip-build` etc.
         out.update = true
+        out.passthrough.push(...argv.slice(i + 1))
+        i = argv.length
+        break
+      case "--setup-sudo":
+        // Anything after --setup-sudo is forwarded to setup-sudo.sh
+        // (e.g. --yes, --remove, --print).
+        out.setupSudo = true
         out.passthrough.push(...argv.slice(i + 1))
         i = argv.length
         break
@@ -105,6 +113,17 @@ Flags:
                            cache and config when unchanged). Anything after
                            --update is forwarded verbatim to install.sh,
                            e.g. 'opencode-anycli --update --user --sudo'.
+  --setup-sudo […setup-sudo.sh args]
+                           Auto-detect the system package manager (apt /
+                           dnf / yum / pacman / zypper / apk) and install
+                           a SCOPED NOPASSWD sudoers rule so the agent
+                           can run package installs without password
+                           prompts (which the agent cannot answer through
+                           the cline subprocess). Forwarded args:
+                             --yes      apply without confirm
+                             --print    show what would be applied
+                             --remove   remove the rule
+                           macOS short-circuits with a no-op + advice.
   --auto-approve, --yolo, -y
                            Materialize a temp config that sets every opencode
                            permission (read/edit/bash/external_directory/...)
@@ -172,6 +191,25 @@ function runUpdate(installArgs: string[]): never {
   process.exit(install.status ?? 1)
 }
 
+function runSetupSudo(extraArgs: string[]): never {
+  // setup-sudo.sh lives at <repo>/scripts/setup-sudo.sh.
+  // We locate the install.sh first to find the repo root, then resolve
+  // the script path relative to it.
+  const installScript = locateRepoArtifact("install.sh")
+  if (!installScript) {
+    process.stderr.write("install.sh not found in this checkout — cannot find scripts/setup-sudo.sh.\n")
+    process.exit(2)
+  }
+  const repoDir = dirname(installScript)
+  const setupScript = pathResolve(repoDir, "scripts", "setup-sudo.sh")
+  if (!existsSync(setupScript)) {
+    process.stderr.write(`setup-sudo.sh not found at ${setupScript}\n`)
+    process.exit(2)
+  }
+  const r = spawnSync("bash", [setupScript, ...extraArgs], { stdio: "inherit", cwd: repoDir })
+  process.exit(r.status ?? 1)
+}
+
 /** Walk up from this file to find a sibling artifact (install.sh / doctor.sh). */
 function locateRepoArtifact(name: string): string | null {
   const here = dirname(fileURLToPath(import.meta.url))
@@ -200,6 +238,9 @@ async function main(): Promise<void> {
   }
   if (args.update) {
     runUpdate(args.passthrough)
+  }
+  if (args.setupSudo) {
+    runSetupSudo(args.passthrough)
   }
 
   // Pre-flight checks. Fail fast with friendly hints.

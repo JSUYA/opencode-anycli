@@ -116,12 +116,29 @@ Caveats — there are TWO layers below us we cannot directly control:
    itself TTY-stdin; whether cline forwards that to the bash commands it
    runs is cline's call.
 
-If `sudo` still says "no tty" or never prompts, see the `sudo-helper`
-skill in oh-my-anycli for three reliable workarounds:
+If `sudo` still says "no tty" or never prompts (the inner bash tool
+doesn't forward stdin), the most reliable fix is a SCOPED NOPASSWD
+sudoers entry. The wrapper ships an automated installer:
 
-- **Passwordless sudo for specific commands** (`/etc/sudoers.d/...`
-  with `NOPASSWD: /usr/bin/apt-get update`)
-- **`SUDO_ASKPASS` helper** (GUI password prompt)
+```bash
+opencode-anycli --setup-sudo            # auto-detect distro + interactive confirm
+opencode-anycli --setup-sudo --yes      # apply without prompt (CI / fresh box)
+opencode-anycli --setup-sudo --print    # show what would be applied, do not write
+opencode-anycli --setup-sudo --remove   # remove the rule
+```
+
+It detects your package manager (`apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`),
+writes a scoped `/etc/sudoers.d/opencode-anycli` allowing ONLY those
+specific binaries to run without password (never `NOPASSWD: ALL`),
+validates with `visudo`, and verifies with `sudo -n -l`. macOS short-
+circuits with a no-op message because Homebrew does not need sudo.
+
+`opencode-anycli --doctor` reports whether the rule is installed and active.
+
+Other workarounds for non-package-manager prompts (covered in oh-my-anycli's
+`sudo-helper` skill, invoke via `/sudo`):
+
+- **`SUDO_ASKPASS` helper** (GUI password prompt — useful for `ssh-add`)
 - **Pre-authorize the sudo cache** (`sudo -v` outside opencode-anycli,
   then start the session within the cache TTL)
 
