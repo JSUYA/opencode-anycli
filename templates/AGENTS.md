@@ -1,6 +1,6 @@
 # Default Agent Instructions
 
-This file ships with opencode-anycli and is copied to `~/.config/opencode-anycli/AGENTS.md` on first install. Customize it for your own workflow.
+This file ships with OpenCode-AnyCLI and is copied to `~/.config/opencode-anycli/AGENTS.md` on first install. Customize it for your own workflow.
 
 ## Cline CLI Etiquette
 

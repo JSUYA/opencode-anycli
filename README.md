@@ -1,8 +1,8 @@
-# opencode-anycli
+# OpenCode-AnyCLI
 
 > Run the opencode AI coding agent through your locally installed cline CLI.
 
-opencode-anycli installs a small opencode adapter that forwards model requests to `cline --json --yolo --act <prompt>`. cline keeps using the model, credentials, and tool behavior the user has already configured.
+OpenCode-AnyCLI installs a small opencode adapter that forwards model requests to `cline --json --yolo --act <prompt>`. cline keeps using the model, credentials, and tool behavior the user has already configured.
 
 ## Upstream projects & what this bundle adds
 
@@ -36,15 +36,15 @@ No source files are copied from opencode, cline, or the AI SDK. We import
 
 ## Coding Advantages Over Plain cline CLI
 
-opencode-anycli does not improve model quality by itself; cline still uses the same configured model. The advantage is that coding work runs inside opencode's project-oriented workflow instead of a raw one-shot CLI prompt.
+OpenCode-AnyCLI does not improve model quality by itself; cline still uses the same configured model. The advantage is that coding work runs inside opencode's project-oriented workflow instead of a raw one-shot CLI prompt.
 
 - **Better codebase navigation:** use opencode's TUI, session context, and file-aware workflow while delegating model calls to cline.
 - **More structured implementation:** feature work can be handled as inspect -> plan -> edit -> verify instead of a single loose prompt.
 - **More reliable debugging:** runtime failures can be analyzed through code-path tracing, ranked hypotheses, minimal fixes, and follow-up tests.
-- **Config isolation:** opencode-anycli keeps its opencode config, skills, commands, and agents under `~/.config/opencode-anycli` instead of mixing them with a user's normal opencode setup.
-- **Workflow extension point:** oh-my-anycli can add reusable slash commands, skills, and subagents on top of the same cline-backed model path.
+- **Config isolation:** OpenCode-AnyCLI keeps its opencode config, skills, commands, and agents under `~/.config/opencode-anycli` instead of mixing them with a user's normal opencode setup.
+- **Workflow extension point:** Oh-My-AnyCLI can add reusable slash commands, skills, and subagents on top of the same cline-backed model path.
 
-For tiny edits or quick questions, direct cline CLI can still be faster. opencode-anycli is most useful when the coding task benefits from navigation, repeatable process, and verification.
+For tiny edits or quick questions, direct cline CLI can still be faster. OpenCode-AnyCLI is most useful when the coding task benefits from navigation, repeatable process, and verification.
 
 ## Install
 
@@ -55,7 +55,7 @@ cd opencode-anycli
 ```
 
 `opencode` and `cline` are treated as **bundled runtime dependencies of
-opencode-anycli** — if either is missing on `PATH`, the installer fetches
+OpenCode-AnyCLI** — if either is missing on `PATH`, the installer fetches
 it for you via `npm install -g` (no extra flag required). Conceptually,
 `opencode-anycli` IS opencode + cline + our provider/config wired
 together; the three pieces just happen to ship as separate npm packages
@@ -97,7 +97,7 @@ opencode-anycli --update --user --sudo    # multiple args also OK
 
 ## Interactive Subprocesses & sudo
 
-opencode-anycli keeps the cline subprocess's stdin connected to the
+OpenCode-AnyCLI keeps the cline subprocess's stdin connected to the
 parent TTY **by default**, so commands the agent runs can prompt the
 user — `sudo`, `ssh-add`, `gh auth login`, `expect`-style flows, etc.
 The wrapper does not need a flag for this; it is the default.
@@ -135,7 +135,7 @@ OPENCODE_ANYCLI_DANGEROUS=1 opencode-anycli         # env-var equivalent
 
 What it does:
 
-1. Re-execs the entire opencode-anycli process under `sudo -E`.
+1. Re-execs the entire OpenCode-AnyCLI process under `sudo -E`.
    You enter your password **once**, at startup. From that moment on,
    opencode + cline + every subprocess they spawn run as root, so the
    agent can call `apt install`, `systemctl`, `docker pull`, `usermod`,
@@ -246,7 +246,7 @@ The adapter implements the Vercel AI SDK v3 `LanguageModelV3` interface expected
 
 ## Companion Project
 
-[oh-my-anycli](https://github.com/JSUYA/oh-my-anycli) adds reusable skills, slash commands, subagents, and plugins on top of opencode-anycli.
+[Oh-My-AnyCLI](https://github.com/JSUYA/oh-my-anycli) adds reusable skills, slash commands, subagents, and plugins on top of OpenCode-AnyCLI.
 
 ## Documentation
 

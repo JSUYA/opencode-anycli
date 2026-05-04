@@ -1,6 +1,6 @@
 # Installation
 
-This guide installs opencode-anycli so opencode can run through the local cline CLI.
+This guide installs OpenCode-AnyCLI so opencode can run through the local cline CLI.
 
 ## Prerequisites
 
@@ -31,13 +31,13 @@ The installer checks Node, opencode, and cline, builds the workspace, writes the
 
 ## Cline First Run
 
-Run cline once before using opencode-anycli:
+Run cline once before using OpenCode-AnyCLI:
 
 ```bash
 cline
 ```
 
-Complete cline's model and credential setup. opencode-anycli expects `~/.cline/data/globalState.json` to exist.
+Complete cline's model and credential setup. OpenCode-AnyCLI expects `~/.cline/data/globalState.json` to exist.
 
 ## Reinstall From Existing Build
 

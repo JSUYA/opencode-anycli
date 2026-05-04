@@ -1,6 +1,6 @@
 # Architecture
 
-opencode-anycli adapts opencode model requests to the local cline CLI.
+OpenCode-AnyCLI adapts opencode model requests to the local cline CLI.
 
 ## Flow
 

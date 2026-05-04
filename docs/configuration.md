@@ -6,7 +6,7 @@
 | --- | --- |
 | `~/.config/opencode-anycli/opencode/opencode.json` | opencode configuration and adapter registration. |
 | `~/.config/opencode-anycli/opencode/AGENTS.md` | Default agent instructions. |
-| `~/.config/opencode-anycli/opencode/{commands,agents,skills}/` | Optional extensions installed by oh-my-anycli. |
+| `~/.config/opencode-anycli/opencode/{commands,agents,skills}/` | Optional extensions installed by Oh-My-AnyCLI. |
 | `~/.cline/data/globalState.json` | cline-managed model settings. |
 | `~/.cline/data/secrets.json` | cline-managed secrets when present. |
 
