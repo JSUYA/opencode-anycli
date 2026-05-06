@@ -51,23 +51,41 @@ const tui: TuiPlugin = async (api) => {
   }
 
   const showDialog = () => {
-    api.ui.dialog.replace(() =>
-      api.ui.DialogConfirm({
-        title: "Exit opencode-anycli?",
-        // DialogConfirm wires Enter to whichever button is focused, ←/→ to
-        // switch focus, and Escape to cancel — there is no Y/N keyboard
-        // shortcut. We default the focus to Confirm so Enter alone exits.
-        message:
-          "Enter to exit (Confirm is focused). " +
-          "Press Escape or move to Cancel to keep the session open.",
-        onConfirm: () => confirmExit(),
-        onCancel: () => disarm(),
-      }),
+    // The second arg to dialog.replace is an onClose callback that opencode
+    // invokes whenever the dialog stack is torn down — including the
+    // external paths we don't otherwise observe: pressing Ctrl+C or Escape
+    // while the dialog is open (handled in opencode/ui/dialog.tsx, line 85)
+    // and any later dialog.clear() / dialog.replace() from elsewhere. We
+    // hook disarm() here so a `Ctrl+C → Ctrl+C → Ctrl+C` sequence does
+    // NOT skip straight to confirmExit on press 3 (the bug the user hit:
+    // press 1 armed us, press 2 closed the dialog via dialog.tsx without
+    // running our onCancel, press 3 found armed=true and exited silently).
+    api.ui.dialog.replace(
+      () =>
+        api.ui.DialogConfirm({
+          title: "Exit opencode-anycli?",
+          // DialogConfirm wires Enter to whichever button is focused, ←/→
+          // to switch focus, and Escape to cancel — there is no Y/N
+          // keyboard shortcut. We default focus to Confirm so Enter alone
+          // exits.
+          message:
+            "Enter to exit (Confirm is focused). " +
+            "Press Escape or move to Cancel to keep the session open.",
+          onConfirm: () => confirmExit(),
+          onCancel: () => disarm(),
+        }),
+      () => disarm(),
     )
   }
 
   const onCtrlC = () => {
     if (armed) {
+      // Armed AND user pressed Ctrl+C again WITHOUT the dialog being
+      // open — only happens when the dialog is currently visible and
+      // the user double-tapped within the rearm window. Treat as
+      // confirmation to exit. (If the dialog was closed by an external
+      // path between presses, the onClose callback we passed to
+      // dialog.replace already disarmed us, so we won't end up here.)
       confirmExit()
       return
     }
