@@ -261,6 +261,34 @@ if [ ! -f "$AGENTS_TARGET" ]; then
   ok "AGENTS.md installed: $AGENTS_TARGET"
 fi
 
+# tui.json — opencode reads this for keybind / plugin overrides. We ship one
+# that (1) removes ctrl+c from the `app_exit` keybind so the component-level
+# exit-on-Ctrl+C handlers stop firing, and (2) registers our exit-confirm
+# TUI plugin via the file:// URL of its built directory. The plugin shows a
+# DialogConfirm before actually running app.exit. The path is materialised
+# from a placeholder so a relocated repo still works.
+TUI_TARGET="$CONFIG_DIR/tui.json"
+TUI_SOURCE="$REPO_DIR/templates/tui.json"
+EXIT_CONFIRM_DIR="$REPO_DIR/packages/tui-plugin-exit-confirm"
+if [ ! -f "$EXIT_CONFIRM_DIR/dist/tui.js" ]; then
+  err "Exit-confirm plugin dist not found at $EXIT_CONFIRM_DIR/dist/tui.js"
+  err "Run ./install.sh without --skip-build to build first."
+  exit 1
+fi
+TUI_EXPECTED="$(sed "s|__OPENCODE_ANYCLI_EXIT_CONFIRM_DIR__|${EXIT_CONFIRM_DIR}|g" "$TUI_SOURCE")"
+if [ -f "$TUI_TARGET" ] && [ "$(cat "$TUI_TARGET")" = "$TUI_EXPECTED" ]; then
+  ok "tui.json already up-to-date: $TUI_TARGET"
+elif [ -f "$TUI_TARGET" ]; then
+  BACKUP="$TUI_TARGET.bak.$(date +%s)"
+  cp "$TUI_TARGET" "$BACKUP"
+  warn "Existing tui.json differs; previous version backed up: $BACKUP"
+  printf '%s\n' "$TUI_EXPECTED" > "$TUI_TARGET"
+  ok "tui.json installed: $TUI_TARGET"
+else
+  printf '%s\n' "$TUI_EXPECTED" > "$TUI_TARGET"
+  ok "tui.json installed: $TUI_TARGET"
+fi
+
 # ─── 7. Symlink the CLI ───────────────────────────────────────────────────────
 step "Linking opencode-anycli binary"
 BIN_SRC="$REPO_DIR/packages/cli/bin/opencode-anycli"

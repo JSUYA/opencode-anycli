@@ -201,6 +201,37 @@ Notes:
   (observed for several non-Anthropic provider paths), the provider falls
   back to the per-assistant `metrics` block in `api_conversation_history.json`.
 
+## Ctrl+C handling (exit-confirm dialog)
+
+Pressing **Ctrl+C** inside the opencode TUI no longer exits immediately.
+Instead an `Exit opencode-anycli?` confirmation dialog appears with
+**Confirm** focused — press **Enter** to exit, **Escape** (or arrow to
+**Cancel** + Enter) to keep the session open. A second Ctrl+C while the
+dialog is open is suppressed by opencode's dialog layer; use Enter or
+Escape to dismiss.
+
+This is implemented as an opencode TUI plugin shipped with this project
+(`packages/tui-plugin-exit-confirm`) and registered automatically by the
+`tui.json` that `install.sh` writes alongside `opencode.json`. The
+plugin works by:
+
+1. Rebinding opencode's `app_exit` keybind to drop `ctrl+c` so the
+   built-in exit-on-Ctrl+C handlers stop firing.
+2. Routing `ctrl+c` through opencode's otherwise-unused
+   `display_thinking` keybind (no opencode component checks it via direct
+   `keybind.match()` — only the global command dispatcher does).
+3. Registering a single hidden TuiCommand on that keybind whose
+   `onSelect` opens an `api.ui.DialogConfirm`. The dispatcher prepends
+   plugin registrations and returns after the first match, so opencode's
+   built-in `display_thinking` toggle does not also fire.
+4. On confirm, calling `api.command.trigger("app.exit")` to reuse the
+   exact shutdown path opencode uses for its own exit (renderer
+   teardown, terminal-title reset, etc.).
+
+To revert to opencode's default Ctrl+C-exits behaviour: delete
+`~/.config/opencode-anycli/opencode/tui.json` (or remove the
+`display_thinking` keybind override and `plugin: [...]` entry inside it).
+
 ## Auto-approve (Yolo Mode)
 
 opencode itself prompts for approval on file edits, bash commands, web
