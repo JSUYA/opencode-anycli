@@ -5,17 +5,20 @@
 //   1. opencode-anycli's tui.json removes `ctrl+c` from the `app_exit`
 //      keybind so the component-level `keybind.match("app_exit", evt)`
 //      checks in opencode's session/prompt routes stop firing on Ctrl+C.
-//      It also rebinds the otherwise-unused `display_thinking` keybind to
-//      `ctrl+c` — `display_thinking` was chosen because no opencode
-//      component handler invokes it via direct `keybind.match()`; it is
-//      only routed through the global command dispatcher in
-//      `dialog-command.tsx`, so a plugin command claiming the same
-//      keybind name has full control over what happens on press.
-//   2. This plugin registers a single hidden TuiCommand with
-//      `keybind: "display_thinking"`. The command dispatcher prepends
-//      plugin registrations, so our handler fires before opencode's
-//      built-in `display_thinking` command, which makes the dispatcher
-//      `return` after our match (it stops at the first matching command).
+//      It then rebinds the unused `username_toggle` keybind to `ctrl+c`
+//      and registers our command on that name. `username_toggle` was
+//      verified by full-tree grep to be defined ONLY in the keybind
+//      schema — no opencode component, dialog, or built-in command
+//      references it via `keybind.match()` or `keybind: "..."`. That
+//      makes it the only keybind name with no upstream owner, so the
+//      plugin command we attach to it is the sole handler.
+//   2. The first attempt used `display_thinking`, but session routes
+//      register an internal `session.toggle.thinking` command on that
+//      keybind AFTER plugin load (route mounts when the user opens a
+//      session) — and the command dispatcher prepends each
+//      registration, so the route's command ends up first in the
+//      iteration order and shadows the plugin handler. `username_toggle`
+//      has no upstream registration to lose to.
 //   3. On press we replace the dialog stack with a `DialogConfirm`. Y
 //      confirms exit → triggers the built-in `app.exit` command (so the
 //      shutdown path is exactly opencode's, not ours). N / Escape closes
@@ -80,10 +83,10 @@ const tui: TuiPlugin = async (api) => {
     {
       title: "Exit opencode-anycli (with confirmation)",
       value: "opencode-anycli.exit-confirm",
-      // `display_thinking` is the only keybind opencode wires solely
-      // through the global command dispatcher (no direct keybind.match()
-      // in components); see header comment for the full reasoning.
-      keybind: "display_thinking",
+      // See header for keybind selection rationale; in short:
+      // username_toggle is defined in the schema but referenced nowhere
+      // else in opencode's TUI source, so our handler is unopposed.
+      keybind: "username_toggle",
       hidden: true,
       category: "System",
       onSelect: () => onCtrlC(),
