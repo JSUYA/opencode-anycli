@@ -9,6 +9,7 @@
 // Both share the same spawn / parse plumbing.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -17,6 +18,7 @@ import {
   parseLine,
   isApiReqFinished,
   isApiReqStarted,
+  isPartial,
   isTaskStarted,
   pickText,
 } from "./ndjson-parser.js"
@@ -81,8 +83,33 @@ export interface RunInput {
 
 export type StreamEvent =
   | { type: "text-delta"; delta: string }
+  | {
+      type: "tool-call"
+      toolCallId: string
+      toolName: string
+      input: Record<string, unknown>
+    }
+  | {
+      type: "tool-result"
+      toolCallId: string
+      toolName: string
+      result: Record<string, unknown>
+      isError?: boolean
+    }
   | { type: "finish"; usage: RunResult["usage"]; parseErrors: number }
   | { type: "error"; error: Error }
+
+/**
+ * Tool name we surface to opencode for cline's readFile activity.
+ *
+ * Empirically, opencode silently drops `tool-call` stream parts for tool
+ * names it has not registered locally (verified via session_message
+ * inspection — only `text` parts survived an unknown name). So we reuse
+ * opencode's built-in `read` tool name and rely on `providerExecuted: true`
+ * to bypass its execute path while still letting its renderer surface the
+ * "Read <path>" entry in the timeline.
+ */
+export const CLINE_READ_TOOL_NAME = "read"
 
 type VisibleText = {
   channel: string
@@ -103,6 +130,12 @@ export async function runOnce(input: RunInput): Promise<RunResult> {
   for await (const ev of runStreamInternal(input)) {
     if (ev.type === "text-delta") {
       finalText += ev.delta
+    } else if (ev.type === "tool-call") {
+      // Render readFile tool-calls as a short textual marker so consumers
+      // that only look at result.text (doGenerate) still see what cline read.
+      finalText += renderToolCallAsText(ev) ?? ""
+    } else if (ev.type === "tool-result") {
+      // No additional text — the tool-call line above already named the file.
     } else if (ev.type === "finish") {
       usage = ev.usage
       parseErrors = ev.parseErrors
@@ -112,6 +145,17 @@ export async function runOnce(input: RunInput): Promise<RunResult> {
   }
 
   return { text: finalText, usage, parseErrors }
+}
+
+function renderToolCallAsText(ev: { toolName: string; input: Record<string, unknown> }): string | null {
+  if (ev.toolName !== CLINE_READ_TOOL_NAME) return null
+  const filePath = typeof ev.input["filePath"] === "string" ? (ev.input["filePath"] as string) : null
+  if (!filePath) return null
+  const start = typeof ev.input["offset"] === "number" ? (ev.input["offset"] as number) : undefined
+  const limit = typeof ev.input["limit"] === "number" ? (ev.input["limit"] as number) : undefined
+  const end = start !== undefined && limit !== undefined ? start + limit - 1 : undefined
+  const range = start !== undefined ? (end !== undefined && end !== start ? `:${start}-${end}` : `:${start}`) : ""
+  return `[cline:readFile] ${filePath}${range}\n`
 }
 
 /** Streaming runner — yields incremental text deltas. */
@@ -246,6 +290,10 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     recomputeUsage()
   }
 
+  // Track readFile tool-calls we've already surfaced so partial→final
+  // updates don't double-emit. Key: file path that goes into the call.
+  const emittedReads = new Set<string>()
+
   function handleEvent(ev: ClineEvent) {
     if (isTaskStarted(ev)) {
       taskId = pickTaskId(ev) ?? taskId
@@ -259,6 +307,28 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     if (isApiReqFinished(ev)) {
       const eventUsage = pickUsage(ev)
       if (hasTokenUsage(eventUsage)) setUsageSnapshot(usageKey(ev, anonymousUsageEvents++), eventUsage)
+      return
+    }
+    // Surface cline's readFile activity as a structured tool-call so opencode's
+    // generic tool-part renderer can list it for the user. Skip partials —
+    // the path doesn't stream incrementally and emitting on each partial
+    // would duplicate the entry.
+    const readCall = pickReadFileCall(ev)
+    if (readCall !== null) {
+      if (isPartial(ev)) return
+      if (emittedReads.has(readCall.filePath)) return
+      emittedReads.add(readCall.filePath)
+      const toolCallId = `cline-read-${randomUUID()}`
+      const input: Record<string, unknown> = { filePath: readCall.filePath }
+      if (readCall.offset !== undefined) input["offset"] = readCall.offset
+      if (readCall.limit !== undefined) input["limit"] = readCall.limit
+      enqueue({ type: "tool-call", toolCallId, toolName: CLINE_READ_TOOL_NAME, input })
+      enqueue({
+        type: "tool-result",
+        toolCallId,
+        toolName: CLINE_READ_TOOL_NAME,
+        result: { ok: true, filePath: readCall.filePath },
+      })
       return
     }
     const visibleText = pickVisibleText(ev)
@@ -480,6 +550,38 @@ function clineDataDir(options: RunInput["options"]): string {
   }
   const home = options.env?.["HOME"] ?? process.env["HOME"] ?? homedir()
   return join(home, ".cline", "data")
+}
+
+interface ReadFileCall {
+  filePath: string
+  offset?: number
+  limit?: number
+}
+
+function pickReadFileCall(ev: ClineEvent): ReadFileCall | null {
+  const say = eventKind(ev, "say")
+  if (say !== "tool") return null
+  const text = pickText(ev)
+  if (text === null) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!isRecord(parsed)) return null
+  if (pickString(parsed, "tool") !== "readFile") return null
+  // cline emits both a workspace-relative `path` and a resolved absolute
+  // `content`. Prefer the absolute form so opencode's tool-part renderer
+  // shows an unambiguous path; fall back to the relative one.
+  const filePath = pickString(parsed, "content") ?? pickString(parsed, "path")
+  if (!filePath) return null
+  const start = pickNumber(parsed, ["readLineStart"])
+  const end = pickNumber(parsed, ["readLineEnd"])
+  const result: ReadFileCall = { filePath }
+  if (start !== undefined) result.offset = start
+  if (start !== undefined && end !== undefined && end >= start) result.limit = end - start + 1
+  return result
 }
 
 function pickVisibleText(ev: ClineEvent): VisibleText | null {

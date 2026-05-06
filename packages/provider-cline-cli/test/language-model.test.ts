@@ -285,7 +285,7 @@ describe("runOnce", () => {
     expect(result.text).toBe("line 1\nline 2\ndone")
   })
 
-  it("surfaces cline tool activity for readFile events", async () => {
+  it("renders cline readFile activity as a textual marker (runOnce path)", async () => {
     const out = [
       '{"type":"say","say":"tool","text":"{\\"tool\\":\\"readFile\\",\\"path\\":\\"docs/configuration.md\\",\\"content\\":\\"/repo/docs/configuration.md\\",\\"readLineStart\\":1,\\"readLineEnd\\":32}","partial":false}',
     ]
@@ -294,7 +294,45 @@ describe("runOnce", () => {
       options: { command: "cline", timeoutMs: 5000 },
       spawnFn: fakeSpawn(out),
     })
-    expect(result.text).toBe("[cline:readFile] docs/configuration.md:1-32\n")
+    expect(result.text).toBe("[cline:readFile] /repo/docs/configuration.md:1-32\n")
+  })
+
+  it("emits a structured read tool-call/result pair on stream", async () => {
+    const out = [
+      '{"type":"say","say":"tool","text":"{\\"tool\\":\\"readFile\\",\\"path\\":\\"docs/configuration.md\\",\\"content\\":\\"/repo/docs/configuration.md\\",\\"readLineStart\\":1,\\"readLineEnd\\":32}","partial":false}',
+    ]
+    const calls: Array<{ toolName: string; input: Record<string, unknown> }> = []
+    const results: Array<{ toolName: string; result: Record<string, unknown> }> = []
+    for await (const ev of runStream({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })) {
+      if (ev.type === "tool-call") calls.push({ toolName: ev.toolName, input: ev.input })
+      else if (ev.type === "tool-result") results.push({ toolName: ev.toolName, result: ev.result })
+    }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.toolName).toBe("read")
+    expect(calls[0]!.input).toEqual({ filePath: "/repo/docs/configuration.md", offset: 1, limit: 32 })
+    expect(results).toHaveLength(1)
+    expect(results[0]!.toolName).toBe("read")
+    expect(results[0]!.result).toMatchObject({ ok: true, filePath: "/repo/docs/configuration.md" })
+  })
+
+  it("does not double-emit on partial-then-final readFile events", async () => {
+    const out = [
+      '{"type":"say","say":"tool","text":"{\\"tool\\":\\"readFile\\",\\"path\\":\\"a.ts\\",\\"content\\":\\"/repo/a.ts\\"}","partial":true}',
+      '{"type":"say","say":"tool","text":"{\\"tool\\":\\"readFile\\",\\"path\\":\\"a.ts\\",\\"content\\":\\"/repo/a.ts\\"}","partial":false}',
+    ]
+    let calls = 0
+    for await (const ev of runStream({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })) {
+      if (ev.type === "tool-call") calls++
+    }
+    expect(calls).toBe(1)
   })
 
   it("surfaces cline tool output content for search/list events", async () => {

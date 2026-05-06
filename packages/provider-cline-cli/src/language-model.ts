@@ -116,8 +116,25 @@ export class ClineLanguageModel implements LanguageModelV3 {
           timestamp: new Date(),
           modelId,
         })
-        const textBlockId = "text-0"
-        controller.enqueue({ type: "text-start", id: textBlockId })
+
+        // We open a text block lazily (only when actual text-deltas arrive)
+        // and close it before any non-text part. That keeps the V3 stream
+        // protocol clean: no tool-call stuck in the middle of a still-open
+        // text block, no orphan empty text-start/text-end pair.
+        let textBlockCounter = 0
+        let activeTextBlockId: string | null = null
+        const openTextBlock = (): string => {
+          if (activeTextBlockId !== null) return activeTextBlockId
+          const id = `text-${textBlockCounter++}`
+          controller.enqueue({ type: "text-start", id })
+          activeTextBlockId = id
+          return id
+        }
+        const closeTextBlock = () => {
+          if (activeTextBlockId === null) return
+          controller.enqueue({ type: "text-end", id: activeTextBlockId })
+          activeTextBlockId = null
+        }
 
         let usage: ClineUsage = {
           inputTokens: 0,
@@ -128,6 +145,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
           totalCost: undefined,
         }
         let parseErrors = 0
+        let emittedToolCall = false
         try {
           for await (const ev of runStream({
             prompt: promptText,
@@ -135,7 +153,29 @@ export class ClineLanguageModel implements LanguageModelV3 {
             signal: options.abortSignal,
           })) {
             if (ev.type === "text-delta") {
-              controller.enqueue({ type: "text-delta", id: textBlockId, delta: ev.delta })
+              const id = openTextBlock()
+              controller.enqueue({ type: "text-delta", id, delta: ev.delta })
+            } else if (ev.type === "tool-call") {
+              closeTextBlock()
+              // Emit a regular (non-provider-executed) tool-call for
+              // opencode's built-in `read` tool. opencode's session
+              // processor invokes its read-tool handler, which runs
+              // `LSP.touchFile(filePath)` — that is what activates the
+              // matching language server in the right-hand "LSP" panel
+              // ("LSPs will activate as files are read"). We deliberately
+              // pair this with `finishReason: "stop"` below so opencode
+              // does NOT continue the conversation loop with the tool
+              // result; cline already produced the final answer.
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId: ev.toolCallId,
+                toolName: ev.toolName,
+                input: JSON.stringify(ev.input),
+              })
+              emittedToolCall = true
+            } else if (ev.type === "tool-result") {
+              // No-op: opencode generates the real tool-result by running
+              // the read tool itself. We only emit the tool-call.
             } else if (ev.type === "finish") {
               usage = ev.usage
               parseErrors = ev.parseErrors
@@ -143,7 +183,14 @@ export class ClineLanguageModel implements LanguageModelV3 {
               throw ev.error
             }
           }
-          controller.enqueue({ type: "text-end", id: textBlockId })
+          closeTextBlock()
+          // Always end with `stop` — even when we emitted provider-executed
+          // tool-calls. cline finished its task autonomously, so opencode
+          // should not feed any "tool result" back into the model.
+          // (`tool-calls` reason caused an infinite re-prompt loop in
+          // testing; `providerExecuted: true` on the tool-call is what
+          // signals to opencode that we already ran it.)
+          void emittedToolCall
           controller.enqueue({
             type: "finish",
             finishReason: { unified: "stop", raw: undefined },
@@ -154,6 +201,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
           })
           controller.close()
         } catch (err) {
+          closeTextBlock()
           controller.enqueue({
             type: "error",
             error: err instanceof Error ? err : new Error(String(err)),
