@@ -15,7 +15,9 @@ import { existsSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import { resolveConfig, defaultConfigPath } from "./config.js"
 import { checkOpencode, checkCline } from "./ensure-opencode.js"
-import { materializeAutoApproveConfig } from "./auto-approve.js"
+import { materializeTempConfig } from "./temp-config.js"
+import { lookupClineCost } from "./cline-pricing.js"
+import { readGlobalState } from "@opencode-anycli/provider-cline-cli"
 
 const VERSION = "0.1.0"
 
@@ -23,6 +25,7 @@ interface Args {
   config?: string | undefined
   init?: boolean | undefined
   doctor?: boolean | undefined
+  diagPricing?: boolean | undefined
   update?: boolean | undefined
   version?: boolean | undefined
   help?: boolean | undefined
@@ -52,6 +55,11 @@ function parseArgs(argv: readonly string[]): Args {
         break
       case "--doctor":
         out.doctor = true
+        break
+      case "--diag-pricing":
+        // Hidden diagnostic flag used by doctor.sh: print resolved cline
+        // pricing as JSON and exit. Stays out of --help on purpose.
+        out.diagPricing = true
         break
       case "--update":
         // Everything AFTER --update is forwarded to install.sh as-is, so the
@@ -332,6 +340,14 @@ async function main(): Promise<void> {
   if (args.doctor) {
     runDoctor()
   }
+  if (args.diagPricing) {
+    const gs = readGlobalState()
+    const provider = gs && typeof gs["actModeApiProvider"] === "string" ? (gs["actModeApiProvider"] as string) : null
+    const model = gs && typeof gs["actModeApiModelId"] === "string" ? (gs["actModeApiModelId"] as string) : null
+    const match = lookupClineCost({ providerId: provider, modelId: model })
+    process.stdout.write(JSON.stringify({ provider, model, match }) + "\n")
+    return
+  }
   if (args.update) {
     runUpdate(args.passthrough)
   }
@@ -366,18 +382,32 @@ async function main(): Promise<void> {
     return
   }
 
-  // If --auto-approve / --yolo / OPENCODE_ANYCLI_AUTO_APPROVE=1, materialize
-  // a temp config that adds "allow" rules for every documented opencode
-  // permission. The original cfg.path is left untouched. We schedule cleanup
-  // of the temp file on process exit.
+  // Materialise a session-scoped temp config when we need to:
+  //   - turn on auto-approve (--auto-approve / --yolo / OPENCODE_ANYCLI_AUTO_APPROVE)
+  //   - inject `provider.cline.models.<id>.cost` so the TUI can show real
+  //     "$X.XX spent" lines instead of always-$0.00. The cost rates are
+  //     looked up from cline's currently-configured provider+model
+  //     (~/.cline/data/globalState.json) against our static pricing table.
+  //
+  // Both mutations live in one temp file. Original cfg.path is never
+  // touched. We schedule cleanup of the temp file on process exit.
   let configPathForOpencode = cfg.path
   let cleanupPath: string | null = null
-  if (args.autoApprove) {
-    configPathForOpencode = materializeAutoApproveConfig(cfg.path)
-    cleanupPath = configPathForOpencode
-    process.stderr.write(
-      `opencode-anycli: auto-approve enabled (temp config: ${configPathForOpencode})\n`,
-    )
+  const globalState = readGlobalState()
+  const clineModel = globalState
+    ? {
+        providerId: typeof globalState["actModeApiProvider"] === "string" ? (globalState["actModeApiProvider"] as string) : null,
+        modelId: typeof globalState["actModeApiModelId"] === "string" ? (globalState["actModeApiModelId"] as string) : null,
+      }
+    : null
+  const tempConfig = materializeTempConfig(cfg.path, {
+    autoApprove: !!args.autoApprove,
+    clineModel,
+  })
+  if (tempConfig) {
+    configPathForOpencode = tempConfig.path
+    cleanupPath = tempConfig.path
+    for (const note of tempConfig.notes) process.stderr.write(`opencode-anycli: ${note}\n`)
     const cleanup = () => {
       if (cleanupPath) {
         try { rmSync(cleanupPath, { force: true }) } catch { /* ignore */ }

@@ -522,22 +522,73 @@ function pickTaskId(ev: ClineEvent): string | null {
 
 function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): ClineUsage | null {
   const dataDir = clineDataDir(options)
-  const uiMessagesPath = join(dataDir, "tasks", taskId, "ui_messages.json")
-  if (!existsSync(uiMessagesPath)) return null
-  try {
-    const raw: unknown = JSON.parse(readFileSync(uiMessagesPath, "utf8"))
-    if (!Array.isArray(raw)) return null
-    const total = raw.reduce<ClineUsage>((acc, item) => {
-      if (!isRecord(item) || item["type"] !== "say") return acc
-      const say = item["say"]
-      if (say !== "api_req_started" && say !== "deleted_api_reqs" && say !== "subagent_usage") return acc
-      return addUsage(acc, pickUsage(item as ClineEvent))
-    }, emptyUsage())
-    return hasTokenUsage(total) ? total : null
-  } catch (err) {
-    if (DEBUG) process.stderr.write(`[cline-runner] failed to read persisted usage for task ${taskId}: ${String(err)}\n`)
-    return null
+  const taskDir = join(dataDir, "tasks", taskId)
+
+  // Primary source: ui_messages.json. Each api_req_started entry has a `text`
+  // field whose JSON includes tokensIn / tokensOut / cacheReads / cacheWrites
+  // / cost. Some cline providers (e.g. openai-codex/gpt-5.5 locally) populate
+  // every field; others leave token counts off.
+  const uiMessagesPath = join(taskDir, "ui_messages.json")
+  if (existsSync(uiMessagesPath)) {
+    try {
+      const raw: unknown = JSON.parse(readFileSync(uiMessagesPath, "utf8"))
+      if (Array.isArray(raw)) {
+        const total = raw.reduce<ClineUsage>((acc, item) => {
+          if (!isRecord(item) || item["type"] !== "say") return acc
+          const say = item["say"]
+          if (say !== "api_req_started" && say !== "deleted_api_reqs" && say !== "subagent_usage") return acc
+          return addUsage(acc, pickUsage(item as ClineEvent))
+        }, emptyUsage())
+        if (hasTokenUsage(total)) return total
+      }
+    } catch (err) {
+      if (DEBUG) process.stderr.write(`[cline-runner] failed to read ui_messages for task ${taskId}: ${String(err)}\n`)
+    }
   }
+
+  // Fallback: api_conversation_history.json. Cline writes per-assistant
+  // metrics there (`metrics.tokens.{prompt,completion,cached}`, `metrics.cost`)
+  // even when the api_req_started entry in ui_messages.json lacks usage —
+  // observed for several non-Anthropic provider paths. This is what saves
+  // the "0 tokens" display for those models.
+  const apiHistoryPath = join(taskDir, "api_conversation_history.json")
+  if (existsSync(apiHistoryPath)) {
+    try {
+      const raw: unknown = JSON.parse(readFileSync(apiHistoryPath, "utf8"))
+      if (Array.isArray(raw)) {
+        const total = raw.reduce<ClineUsage>((acc, item) => {
+          if (!isRecord(item) || item["role"] !== "assistant") return acc
+          const metrics = item["metrics"]
+          if (!isRecord(metrics)) return acc
+          const tokens = isRecord(metrics["tokens"]) ? metrics["tokens"] : null
+          if (!tokens) return acc
+          const promptTokens = pickNumber(tokens, ["prompt"]) ?? 0
+          const completionTokens = pickNumber(tokens, ["completion"]) ?? 0
+          const cachedTokens = pickNumber(tokens, ["cached"]) ?? 0
+          const cost = pickNumber(metrics, ["cost"])
+          return addUsage(
+            acc,
+            finalizeUsage({
+              inputTokens: promptTokens,
+              outputTokens: completionTokens,
+              cacheWriteTokens: 0,
+              cacheReadTokens: cachedTokens,
+              totalTokens: 0,
+              totalCost: cost,
+            }),
+          )
+        }, emptyUsage())
+        if (hasTokenUsage(total)) return total
+      }
+    } catch (err) {
+      if (DEBUG)
+        process.stderr.write(
+          `[cline-runner] failed to read api_conversation_history for task ${taskId}: ${String(err)}\n`,
+        )
+    }
+  }
+
+  return null
 }
 
 function clineDataDir(options: RunInput["options"]): string {

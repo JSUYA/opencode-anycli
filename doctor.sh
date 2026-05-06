@@ -142,6 +142,49 @@ fi
 note "LSPs for other languages (gopls, lua-ls, terraform-ls, clangd, …) are"
 note "downloaded by opencode on first use; no setup needed here."
 
+# ─── Cost / token display ────────────────────────────────────────────────────
+# opencode's TUI shows "<tokens> · $X.XX spent". The token count comes from
+# the cline run; the dollar amount comes from `provider.cline.models.<id>.cost`
+# in the opencode config. Cline reports cost=0 for most providers, so the
+# wrapper injects a per-1M-token rate at session start by looking cline's
+# currently-configured (provider, model) up against a static pricing table.
+# We delegate the actual lookup to `opencode-anycli --diag-pricing` so we
+# don't have to re-implement table parsing in shell.
+section "Cost / pricing for the current cline model"
+if command -v opencode-anycli >/dev/null 2>&1; then
+  DIAG_JSON="$(opencode-anycli --diag-pricing 2>/dev/null || true)"
+  if [ -z "$DIAG_JSON" ]; then
+    warn "could not resolve pricing (opencode-anycli --diag-pricing failed)"
+  else
+    PROV_OUT="$(printf '%s' "$DIAG_JSON" | node -e "process.stdout.write((JSON.parse(require('fs').readFileSync(0,'utf8')).provider) ?? '')" 2>/dev/null)"
+    MODEL_OUT="$(printf '%s' "$DIAG_JSON" | node -e "process.stdout.write((JSON.parse(require('fs').readFileSync(0,'utf8')).model) ?? '')" 2>/dev/null)"
+    if [ -z "$PROV_OUT" ] || [ -z "$MODEL_OUT" ]; then
+      warn "cline globalState missing actModeApiProvider / actModeApiModelId"
+      note "Run cline once and complete its first-run setup."
+    else
+      note "cline provider = $PROV_OUT / model = $MODEL_OUT"
+      MATCH_KEY="$(printf '%s' "$DIAG_JSON" | node -e "const j=JSON.parse(require('fs').readFileSync(0,'utf8')); process.stdout.write(j.match ? j.match.matchedKey : '')" 2>/dev/null)"
+      if [ -z "$MATCH_KEY" ]; then
+        warn "no pricing entry for $PROV_OUT / $MODEL_OUT → cost line stays \$0.00"
+        note "Add the model in packages/cli/src/cline-pricing.ts, or set"
+        note "provider.cline.models.<id>.cost manually in $OCC."
+      else
+        RATE_LINE="$(printf '%s' "$DIAG_JSON" | node -e "
+          const j=JSON.parse(require('fs').readFileSync(0,'utf8'));
+          const r=j.match.rates;
+          const c=r.cache;
+          const cacheStr = c ? \` cache=read:\${c.read ?? '-'}/write:\${c.write ?? '-'}\` : '';
+          process.stdout.write(\`input:\${r.input} output:\${r.output}\${cacheStr}\`);
+        " 2>/dev/null)"
+        ok "pricing match: $MATCH_KEY  ($RATE_LINE; per 1M tokens)"
+        note "(injected at session start via runtime temp config.)"
+      fi
+    fi
+  fi
+else
+  warn "skipping (opencode-anycli not on PATH — pricing diagnostic needs it)"
+fi
+
 # ─── Privileged-command escape hatch ─────────────────────────────────────────
 section "Privileged commands inside sessions"
 if command -v sudo >/dev/null 2>&1; then

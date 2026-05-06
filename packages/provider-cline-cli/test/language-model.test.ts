@@ -232,6 +232,61 @@ describe("runOnce", () => {
     }
   })
 
+  it("falls back to api_conversation_history metrics when ui_messages lacks usage", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opencode-anycli-test-"))
+    try {
+      const taskDir = join(home, ".cline", "data", "tasks", "task-2")
+      mkdirSync(taskDir, { recursive: true })
+      // ui_messages.json present but with no token fields in the JSON text
+      // — emulates the observed behaviour for several non-Anthropic providers.
+      writeFileSync(
+        join(taskDir, "ui_messages.json"),
+        JSON.stringify([
+          {
+            type: "say",
+            say: "api_req_started",
+            text: JSON.stringify({ request: "prompt" }),
+          },
+        ]),
+      )
+      writeFileSync(
+        join(taskDir, "api_conversation_history.json"),
+        JSON.stringify([
+          { role: "user", content: [{ type: "text", text: "hi" }] },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "hello" }],
+            metrics: { tokens: { prompt: 200, completion: 40, cached: 80 }, cost: 0.012 },
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "follow-up" }],
+            metrics: { tokens: { prompt: 50, completion: 10, cached: 20 }, cost: 0.003 },
+          },
+        ]),
+      )
+      const out = [
+        '{"type":"task_started","taskId":"task-2"}',
+        '{"type":"say","say":"text","text":"ok","partial":false}',
+      ]
+      const result = await runOnce({
+        prompt: "ignored",
+        options: { command: "cline", timeoutMs: 5000, env: { HOME: home } },
+        spawnFn: fakeSpawn(out),
+      })
+      expect(result.usage).toEqual({
+        inputTokens: 250,
+        outputTokens: 50,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 100,
+        totalTokens: 400,
+        totalCost: 0.015,
+      })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   it("returns zero usage when api_req_finished is absent (does not fabricate)", async () => {
     const out = ['{"type":"say","say":"text","text":"hi","partial":false}']
     const result = await runOnce({
