@@ -387,8 +387,14 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       // Killed by signal but neither our timeout nor our abort fired — external SIGTERM/SIGKILL.
       exitErr = new Error(`cline terminated by signal ${sigterm}.${stderrSuffix}`)
     } else {
+      // Persisted file is the source of truth (cline writes the final
+      // tokens there after stdout closes). Use it whenever it's available;
+      // fall back to the streaming-captured snapshot otherwise. We
+      // previously used `Math.max(streaming, persisted)`, but that mixed
+      // values from different snapshots and produced fluctuating numbers
+      // when persisted and streaming disagreed.
       const persistedUsage = taskId === null ? null : readPersistedTaskUsage(taskId, options)
-      if (persistedUsage !== null && persistedUsage.totalTokens > usage.totalTokens) usage = persistedUsage
+      if (persistedUsage !== null && hasTokenUsage(persistedUsage)) usage = persistedUsage
       enqueue({ type: "finish", usage, parseErrors })
     }
     done = true
@@ -512,11 +518,19 @@ function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): C
     try {
       const raw: unknown = JSON.parse(readFileSync(uiMessagesPath, "utf8"))
       if (Array.isArray(raw)) {
+        // Only consider entries that describe the CURRENT conversation's
+        // last API call. Excluded:
+        //   - subagent_usage: tokens from a nested agent's separate context.
+        //   - deleted_api_reqs: tokens that were compacted out, NOT current.
+        // Including either of those used to surface huge numbers (e.g. one
+        // user reported 170K / 133% for "hi" — turned out subagent_usage
+        // had the latest ts and was being picked over the real api_req
+        // entry).
         let best: { ts: number; usage: ClineUsage } | null = null
         for (const item of raw) {
           if (!isRecord(item) || item["type"] !== "say") continue
           const say = item["say"]
-          if (say !== "api_req_started" && say !== "deleted_api_reqs" && say !== "subagent_usage") continue
+          if (say !== "api_req_started" && say !== "api_req_finished") continue
           const u = pickUsage(item as ClineEvent)
           if (!hasTokenUsage(u)) continue
           const ts = typeof item["ts"] === "number" ? (item["ts"] as number) : 0

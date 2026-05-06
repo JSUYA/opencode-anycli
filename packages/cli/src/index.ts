@@ -169,6 +169,19 @@ Flags:
   --version, -V            Print version and exit
   --help, -h               Print this help and exit
 
+Ctrl+C handling:
+  Inside the opencode TUI (terminal in raw mode), Ctrl+C is handled by
+  opencode itself. Our shipped tui.json removes ctrl+c from app_exit, so
+  Ctrl+C in the TUI only clears the input field — no accidental session
+  exit. To leave the TUI, type ':exit' / ':quit' / ':q' in the prompt.
+
+  Outside the TUI (boot window, opencode run, errors, post-teardown —
+  cooked-mode terminal where Ctrl+C is delivered as SIGINT), the wrapper
+  takes over: press Ctrl+C once to arm a 2-second exit window, press it
+  again within the window to tear the whole session down (SIGTERM the
+  opencode + cline subprocess group, exit code 130). A single press
+  followed by inactivity quietly resets.
+
 Anything not listed above is passed through to opencode unchanged.
 
 Environment:
@@ -408,17 +421,16 @@ async function main(): Promise<void> {
     configPathForOpencode = tempConfig.path
     cleanupPath = tempConfig.path
     for (const note of tempConfig.notes) process.stderr.write(`opencode-anycli: ${note}\n`)
-    const cleanup = () => {
-      if (cleanupPath) {
-        try { rmSync(cleanupPath, { force: true }) } catch { /* ignore */ }
-        try { rmSync(dirname(cleanupPath), { recursive: true, force: true }) } catch { /* ignore */ }
-        cleanupPath = null
-      }
-    }
-    process.on("exit", cleanup)
-    process.on("SIGINT", () => { cleanup(); process.exit(130) })
-    process.on("SIGTERM", () => { cleanup(); process.exit(143) })
   }
+  const cleanupTempConfig = () => {
+    if (cleanupPath) {
+      try { rmSync(cleanupPath, { force: true }) } catch { /* ignore */ }
+      try { rmSync(dirname(cleanupPath), { recursive: true, force: true }) } catch { /* ignore */ }
+      cleanupPath = null
+    }
+  }
+  process.on("exit", cleanupTempConfig)
+  process.on("SIGTERM", () => { cleanupTempConfig(); process.exit(143) })
 
   // Spawn opencode with OPENCODE_CONFIG pointing at our resolved file
   // (or the auto-approve temp file when applicable).
@@ -443,16 +455,36 @@ async function main(): Promise<void> {
   // informational, but downstream code (e.g. doctor, future tooling) can key
   // off it to know auto-approve is in effect for this session.
   // Inherit stdio so the TUI works.
+  // XDG_CONFIG_HOME redirect: most desktop shells pre-set XDG_CONFIG_HOME
+  // to "$HOME/.config" (literally that string, not unset), so a previous
+  // version that did `process.env["XDG_CONFIG_HOME"] || …` always inherited
+  // the parent's value and silently failed to redirect — opencode then
+  // discovered tui.json / commands / agents under ~/.config/opencode/
+  // (the user's main opencode dir) instead of our wrapper-private space.
+  // OPENCODE_CONFIG masked half the breakage by pointing opencode.json
+  // explicitly, but anything XDG-discovered (tui.json keybinds, skills,
+  // commands, agents) was reading from the wrong place. Force-override.
+  // Power users who really need a different dir can set OPENCODE_ANYCLI_XDG.
+  const wrapperXdg =
+    process.env["OPENCODE_ANYCLI_XDG"] || `${homedir()}/.config/opencode-anycli`
   const env = {
     ...process.env,
     OPENCODE_CONFIG: configPathForOpencode,
-    XDG_CONFIG_HOME: process.env["XDG_CONFIG_HOME"] || `${homedir()}/.config/opencode-anycli`,
+    XDG_CONFIG_HOME: wrapperXdg,
     OPENCODE_DISABLE_MODELS_FETCH: process.env["OPENCODE_DISABLE_MODELS_FETCH"] ?? "1",
     ...(args.autoApprove ? { OPENCODE_ANYCLI_AUTO_APPROVE: "1" } : {}),
     ...(args.noTty ? { OPENCODE_ANYCLI_TTY: "0" } : {}),
   }
-  const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
+  // Spawn opencode with `detached: true` so it becomes the leader of its
+  // own process group. This lets the wrapper own SIGINT from the controlling
+  // TTY: pressing Ctrl+C only signals the wrapper, NOT the child, so we can
+  // implement a double-press confirm-to-exit gesture without losing
+  // opencode's own session-interrupt feature (we forward the first press to
+  // the child group below).
+  const child = spawn("opencode", args.passthrough, { stdio: "inherit", env, detached: true })
+  installCtrlCExitGuard(child)
   child.on("close", (code, signal) => {
+    cleanupTempConfig()
     if (signal) {
       process.exit(1)
     }
@@ -461,6 +493,63 @@ async function main(): Promise<void> {
   child.on("error", (err) => {
     process.stderr.write(`Failed to spawn opencode: ${err.message}\n`)
     process.exit(1)
+  })
+}
+
+/**
+ * Wire up the wrapper's Ctrl+C double-press exit guard.
+ *
+ * Scope: this handler only fires when the controlling TTY is in cooked
+ * mode and Ctrl+C is delivered as a SIGINT signal. That covers the
+ * brief boot window before opencode initialises its TUI, the entire
+ * lifetime of `opencode run` (non-TUI) sessions, and any post-TUI
+ * cooked-mode output. Inside the opencode TUI the terminal is in raw
+ * mode (ISIG off) and Ctrl+C arrives as the byte 0x03 directly to
+ * opencode's keybind layer — the wrapper never sees it. For "no
+ * accidental in-TUI exit" we instead rebind opencode's `app_exit` to
+ * drop ctrl+c via templates/tui.json (the user types `:exit`/`:quit`
+ * to leave the TUI).
+ *
+ * Behaviour for the cooked-mode path:
+ *   1st Ctrl+C — print a yellow one-line hint and arm a 2-second window.
+ *                We deliberately do NOT forward SIGINT to opencode: the
+ *                child group has no SIGINT handler and would die on the
+ *                first signal, defeating the purpose. opencode keeps
+ *                running undisturbed.
+ *   2nd Ctrl+C within 2 s — SIGTERM the detached child group (which
+ *                propagates to cline and any inner subprocesses), schedule
+ *                a 1 s SIGKILL fallback, and exit the wrapper with 130.
+ *   No 2nd press — the window quietly resets; nothing else changes.
+ */
+function installCtrlCExitGuard(child: ReturnType<typeof spawn>): void {
+  const EXIT_WINDOW_MS = 2000
+  let armed = false
+  let armedTimer: NodeJS.Timeout | null = null
+
+  const killChildGroup = (signal: NodeJS.Signals) => {
+    if (child.pid === undefined) return
+    try { process.kill(-child.pid, signal) } catch { /* ignore */ }
+  }
+
+  process.on("SIGINT", () => {
+    if (armed) {
+      if (armedTimer) clearTimeout(armedTimer)
+      armed = false
+      process.stderr.write("\r\x1b[2K\x1b[1;31m^^C — exiting opencode-anycli.\x1b[0m\n")
+      killChildGroup("SIGTERM")
+      setTimeout(() => killChildGroup("SIGKILL"), 1000).unref()
+      process.exit(130)
+    }
+
+    armed = true
+    process.stderr.write(
+      "\r\x1b[2K\x1b[1;33m^C — press Ctrl+C again within 2s to exit opencode-anycli.\x1b[0m\n",
+    )
+    armedTimer = setTimeout(() => {
+      armed = false
+      armedTimer = null
+    }, EXIT_WINDOW_MS)
+    armedTimer.unref()
   })
 }
 
