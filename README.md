@@ -162,45 +162,6 @@ deliberately):
 `opencode-anycli --doctor` reports whether `sudo` is available so the
 flag will work.
 
-## Cost / pricing for the cline model
-
-opencode's TUI shows `<tokens> · $X.XX spent` in the bottom prompt bar and a
-`Context` widget in the right sidebar. The token count comes from the cline
-run; the dollar amount comes from `provider.cline.models.<id>.cost` in the
-opencode config. Cline reports `cost: 0` for most providers, so without
-explicit rates the line always reads `$0.00 spent` regardless of usage.
-
-OpenCode-AnyCLI fixes that automatically: at session start the wrapper reads
-cline's currently-configured `(actModeApiProvider, actModeApiModelId)` from
-`~/.cline/data/globalState.json`, looks them up against a static pricing
-table (`packages/cli/src/cline-pricing.ts`, covering Anthropic / OpenAI /
-Gemini / DeepSeek / xAI / Mistral as of 2026-05), and injects the matched
-per-1M-token rates into a session-scoped temp config. The original
-`opencode.json` is never modified.
-
-```text
-opencode-anycli: cline cost: anthropic/claude-sonnet-4 → input $3/1M, output $15/1M
-```
-
-To verify the resolution for your environment:
-
-```bash
-opencode-anycli --doctor   # see the "Cost / pricing" section
-```
-
-Notes:
-
-- An explicit `provider.cline.models.<id>.cost` in your own `opencode.json`
-  always wins. The wrapper only injects when a model has no `cost` field set.
-- Models we don't have an entry for (the table is opt-in by name match)
-  fall through with no injection, and `$0.00 spent` continues to show. To
-  fix locally, add a row to the pricing module or set the `cost` block
-  manually in your config.
-- Token counts also come through more reliably now: when cline's
-  `ui_messages.json` lacks the `tokensIn / tokensOut / cacheReads` fields
-  (observed for several non-Anthropic provider paths), the provider falls
-  back to the per-assistant `metrics` block in `api_conversation_history.json`.
-
 ## Ctrl+C handling (exit-confirm dialog)
 
 Pressing **Ctrl+C** inside the opencode TUI no longer exits immediately.
