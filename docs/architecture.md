@@ -14,7 +14,7 @@ opencode
 
 ## Subprocess Mode
 
-Subprocess mode is the implemented default. It keeps cline as the model caller and tool runner. The adapter flattens AI SDK messages into one prompt, starts cline, reads NDJSON lines, forwards cline's visible reasoning/text/output events, and returns Vercel AI SDK v3-compatible results.
+Subprocess mode is the implemented default. It keeps cline as the model caller and tool runner. The adapter flattens AI SDK messages into one prompt, starts cline, reads NDJSON lines, forwards cline's visible reasoning/text/output events, reports token/cache usage from cline events or persisted task state, and returns Vercel AI SDK v3-compatible results.
 
 ## Passthrough Mode
 

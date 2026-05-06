@@ -19,7 +19,7 @@ import type {
 } from "@ai-sdk/provider"
 import { runOnce, runStream } from "./cline-runner.js"
 import { flattenPrompt } from "./prompt-flatten.js"
-import type { ClineProviderOptions } from "./types.js"
+import type { ClineProviderOptions, ClineUsage } from "./types.js"
 
 const DEFAULT_TIMEOUT_MS = 600_000
 
@@ -77,7 +77,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
     return {
       content: [{ type: "text", text: result.text }],
       finishReason,
-      usage: toV3Usage(result.usage.inputTokens, result.usage.outputTokens),
+      usage: toV3Usage(result.usage),
       warnings: [],
       response: {
         id: cryptoRandomId(),
@@ -119,7 +119,14 @@ export class ClineLanguageModel implements LanguageModelV3 {
         const textBlockId = "text-0"
         controller.enqueue({ type: "text-start", id: textBlockId })
 
-        let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+        let usage: ClineUsage = {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+          totalTokens: 0,
+          totalCost: undefined,
+        }
         let parseErrors = 0
         try {
           for await (const ev of runStream({
@@ -140,7 +147,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
           controller.enqueue({
             type: "finish",
             finishReason: { unified: "stop", raw: undefined },
-            usage: toV3Usage(usage.inputTokens, usage.outputTokens),
+            usage: toV3Usage(usage),
             providerMetadata: {
               cline: { parseErrors, modelLabel: modelId },
             },
@@ -167,18 +174,29 @@ function cryptoRandomId(): string {
   return `cline-${randomUUID()}`
 }
 
-function toV3Usage(inputTokens: number, outputTokens: number): import("@ai-sdk/provider").LanguageModelV3Usage {
-  return {
+function toV3Usage(usage: ClineUsage): import("@ai-sdk/provider").LanguageModelV3Usage {
+  const inputTotal = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+  const raw: Record<string, number> = {}
+  if (usage.inputTokens > 0) raw["tokensIn"] = usage.inputTokens
+  if (usage.outputTokens > 0) raw["tokensOut"] = usage.outputTokens
+  if (usage.cacheWriteTokens > 0) raw["cacheWrites"] = usage.cacheWriteTokens
+  if (usage.cacheReadTokens > 0) raw["cacheReads"] = usage.cacheReadTokens
+  if (usage.totalCost !== undefined) raw["cost"] = usage.totalCost
+
+  const result: import("@ai-sdk/provider").LanguageModelV3Usage = {
     inputTokens: {
-      total: inputTokens || undefined,
-      noCache: inputTokens || undefined,
-      cacheRead: undefined,
-      cacheWrite: undefined,
+      total: inputTotal || undefined,
+      noCache: usage.inputTokens || undefined,
+      cacheRead: usage.cacheReadTokens || undefined,
+      cacheWrite: usage.cacheWriteTokens || undefined,
     },
     outputTokens: {
-      total: outputTokens || undefined,
-      text: outputTokens || undefined,
+      total: usage.outputTokens || undefined,
+      text: usage.outputTokens || undefined,
       reasoning: undefined,
     },
   }
+
+  if (Object.keys(raw).length > 0) result.raw = raw
+  return result
 }

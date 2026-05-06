@@ -12,3 +12,5 @@ const model = provider.languageModel("default")
 ```
 
 The adapter currently supports subprocess mode. See the repository documentation for opencode integration details.
+
+It forwards cline's visible text stream and maps cline token/cache usage into the AI SDK v3 usage shape.

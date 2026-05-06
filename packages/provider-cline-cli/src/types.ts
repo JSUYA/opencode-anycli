@@ -26,25 +26,40 @@ export interface ClineProviderOptions {
  * `unknown` is fine for the rest — we skip those defensively.
  */
 export type ClineEvent =
-  | { type: "task_started"; taskId?: string }
-  | { type: "say"; say: "text"; text?: string; partial?: boolean }
-  | { type: "say"; say: "reasoning"; text?: string; reasoning?: string; partial?: boolean }
-  | { type: "say"; say: "completion_result"; text?: string; partial?: boolean }
-  | { type: "say"; say: string; text?: string; reasoning?: string; partial?: boolean; commandCompleted?: boolean }
-  | { type: "ask"; ask: string; text?: string; partial?: boolean }
-  | { type: "say"; say: "api_req_started"; text?: string }
-  | { type: "say"; say: "api_req_finished"; tokensIn?: number; tokensOut?: number; cost?: number }
+  | { type: "task_started"; taskId?: string; ts?: number }
+  | { type: "say"; say: "text"; text?: string; partial?: boolean; ts?: number }
+  | { type: "say"; say: "reasoning"; text?: string; reasoning?: string; partial?: boolean; ts?: number }
+  | { type: "say"; say: "completion_result"; text?: string; partial?: boolean; ts?: number }
+  | { type: "say"; say: string; text?: string; reasoning?: string; partial?: boolean; commandCompleted?: boolean; ts?: number }
+  | { type: "ask"; ask: string; text?: string; partial?: boolean; ts?: number }
+  | { type: "say"; say: "api_req_started"; text?: string; ts?: number }
+  | {
+      type: "say"
+      say: "api_req_finished"
+      text?: string
+      tokensIn?: number
+      tokensOut?: number
+      cacheWrites?: number
+      cacheReads?: number
+      cost?: number
+      ts?: number
+    }
   | { type: string; [key: string]: unknown }
+
+export interface ClineUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+  totalTokens: number
+  totalCost: number | undefined
+}
 
 export interface RunResult {
   /** Final assistant text. */
   text: string
-  /** Token counts harvested from cline's `api_req_finished` events, if present. */
-  usage: {
-    inputTokens: number
-    outputTokens: number
-    totalTokens: number
-  }
+  /** Token counts harvested from cline events or persisted task state, if present. */
+  usage: ClineUsage
   /** Number of NDJSON lines that failed to parse — useful for diagnostics. */
   parseErrors: number
 }

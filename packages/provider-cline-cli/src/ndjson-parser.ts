@@ -80,11 +80,20 @@ export function isSayReasoning(e: ClineEvent): e is { type: "say"; say: "reasoni
 
 export function isApiReqFinished(
   e: ClineEvent,
-): e is { type: "say"; say: "api_req_finished"; tokensIn?: number; tokensOut?: number; cost?: number } {
+): e is {
+  type: "say"
+  say: "api_req_finished"
+  text?: string
+  tokensIn?: number
+  tokensOut?: number
+  cacheWrites?: number
+  cacheReads?: number
+  cost?: number
+} {
   return e.type === "say" && (e as { say?: unknown }).say === "api_req_finished"
 }
 
-export function isApiReqStarted(e: ClineEvent): boolean {
+export function isApiReqStarted(e: ClineEvent): e is { type: "say"; say: "api_req_started"; text?: string; ts?: number } {
   return e.type === "say" && (e as { say?: unknown }).say === "api_req_started"
 }
 

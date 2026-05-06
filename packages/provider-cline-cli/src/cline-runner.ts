@@ -9,6 +9,9 @@
 // Both share the same spawn / parse plumbing.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { existsSync, readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import {
   createNdjsonSplitter,
   parseLine,
@@ -17,13 +20,14 @@ import {
   isTaskStarted,
   pickText,
 } from "./ndjson-parser.js"
-import type { ClineEvent, RunResult } from "./types.js"
+import type { ClineEvent, ClineUsage, RunResult } from "./types.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
 
 const VISIBLE_SAY_TEXT_KINDS = new Set([
   "text",
   "completion_result",
+  "tool",
   "command_output",
   "error",
   "error_retry",
@@ -93,7 +97,7 @@ export function buildClineArgs(prompt: string, extraArgs: readonly string[] = []
 /** Buffered runner — collects all text and returns once cline exits or completes. */
 export async function runOnce(input: RunInput): Promise<RunResult> {
   let finalText = ""
-  let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+  let usage = emptyUsage()
   let parseErrors = 0
 
   for await (const ev of runStreamInternal(input)) {
@@ -188,7 +192,10 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // `completion_result` that duplicates it. We emit only the new tail relative
   // to everything already streamed, so consumers get a single coherent stream.
   const emittedByChannel = new Map<string, string>()
-  let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+  let taskId: string | null = null
+  let usage = emptyUsage()
+  const usageSnapshots = new Map<string, ClineUsage>()
+  let anonymousUsageEvents = 0
   let parseErrors = 0
 
   function emitTextIfNew(channel: string, text: string) {
@@ -229,19 +236,29 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     }
   }
 
+  function recomputeUsage() {
+    usage = [...usageSnapshots.values()].reduce(addUsage, emptyUsage())
+  }
+
+  function setUsageSnapshot(key: string, next: ClineUsage) {
+    if (!hasTokenUsage(next)) return
+    usageSnapshots.set(key, next)
+    recomputeUsage()
+  }
+
   function handleEvent(ev: ClineEvent) {
-    if (isTaskStarted(ev) || isApiReqStarted(ev)) {
-      // ignore
+    if (isTaskStarted(ev)) {
+      taskId = pickTaskId(ev) ?? taskId
+      return
+    }
+    if (isApiReqStarted(ev)) {
+      const eventUsage = pickUsage(ev)
+      if (hasTokenUsage(eventUsage)) setUsageSnapshot(usageKey(ev, anonymousUsageEvents++), eventUsage)
       return
     }
     if (isApiReqFinished(ev)) {
-      const ti = typeof ev.tokensIn === "number" ? ev.tokensIn : 0
-      const to = typeof ev.tokensOut === "number" ? ev.tokensOut : 0
-      usage = {
-        inputTokens: usage.inputTokens + ti,
-        outputTokens: usage.outputTokens + to,
-        totalTokens: usage.totalTokens + ti + to,
-      }
+      const eventUsage = pickUsage(ev)
+      if (hasTokenUsage(eventUsage)) setUsageSnapshot(usageKey(ev, anonymousUsageEvents++), eventUsage)
       return
     }
     const visibleText = pickVisibleText(ev)
@@ -302,6 +319,8 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       // Killed by signal but neither our timeout nor our abort fired — external SIGTERM/SIGKILL.
       exitErr = new Error(`cline terminated by signal ${sigterm}.${stderrSuffix}`)
     } else {
+      const persistedUsage = taskId === null ? null : readPersistedTaskUsage(taskId, options)
+      if (persistedUsage !== null && persistedUsage.totalTokens > usage.totalTokens) usage = persistedUsage
       enqueue({ type: "finish", usage, parseErrors })
     }
     done = true
@@ -338,6 +357,131 @@ function wrapErr(err: unknown, prefix: string): Error {
   return new Error(`${prefix}: ${String(err)}`)
 }
 
+function emptyUsage(): ClineUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 0,
+    totalCost: undefined,
+  }
+}
+
+function addUsage(total: ClineUsage, next: ClineUsage): ClineUsage {
+  const totalCost =
+    total.totalCost === undefined && next.totalCost === undefined
+      ? undefined
+      : (total.totalCost ?? 0) + (next.totalCost ?? 0)
+  return finalizeUsage({
+    inputTokens: total.inputTokens + next.inputTokens,
+    outputTokens: total.outputTokens + next.outputTokens,
+    cacheWriteTokens: total.cacheWriteTokens + next.cacheWriteTokens,
+    cacheReadTokens: total.cacheReadTokens + next.cacheReadTokens,
+    totalTokens: 0,
+    totalCost,
+  })
+}
+
+function finalizeUsage(usage: ClineUsage): ClineUsage {
+  return {
+    ...usage,
+    totalTokens: usage.inputTokens + usage.outputTokens + usage.cacheWriteTokens + usage.cacheReadTokens,
+  }
+}
+
+function hasTokenUsage(usage: ClineUsage): boolean {
+  return usage.totalTokens > 0
+}
+
+function pickUsage(ev: ClineEvent): ClineUsage {
+  const textUsage = pickTextUsage(ev)
+  return finalizeUsage({
+    inputTokens: pickNumber(ev, ["tokensIn", "inputTokens"]) ?? textUsage.inputTokens,
+    outputTokens: pickNumber(ev, ["tokensOut", "outputTokens"]) ?? textUsage.outputTokens,
+    cacheWriteTokens: pickNumber(ev, ["cacheWrites", "cacheWriteTokens"]) ?? textUsage.cacheWriteTokens,
+    cacheReadTokens: pickNumber(ev, ["cacheReads", "cacheReadTokens"]) ?? textUsage.cacheReadTokens,
+    totalTokens: 0,
+    totalCost: pickNumber(ev, ["cost", "totalCost"]) ?? textUsage.totalCost,
+  })
+}
+
+function pickTextUsage(ev: ClineEvent): ClineUsage {
+  const text = pickText(ev)
+  if (text === null) return emptyUsage()
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (!isRecord(parsed)) return emptyUsage()
+    const usage = isRecord(parsed["usage"]) ? parsed["usage"] : parsed
+    return finalizeUsage({
+      inputTokens: pickNumber(usage, ["tokensIn", "inputTokens", "promptTokens", "prompt_tokens"]) ?? 0,
+      outputTokens: pickNumber(usage, ["tokensOut", "outputTokens", "completionTokens", "completion_tokens"]) ?? 0,
+      cacheWriteTokens: pickNumber(usage, ["cacheWrites", "cacheWriteTokens", "cache_creation_input_tokens"]) ?? 0,
+      cacheReadTokens: pickNumber(usage, ["cacheReads", "cacheReadTokens", "cache_read_input_tokens"]) ?? 0,
+      totalTokens: 0,
+      totalCost: pickNumber(usage, ["cost", "totalCost", "total_cost"]),
+    })
+  } catch {
+    return emptyUsage()
+  }
+}
+
+function pickNumber(source: unknown, keys: readonly string[]): number | undefined {
+  if (!isRecord(source)) return undefined
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === "number" && Number.isFinite(value)) return value
+  }
+  return undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function usageKey(ev: ClineEvent, fallback: number): string {
+  const ts = (ev as { ts?: unknown }).ts
+  if (typeof ts === "number") return `${eventKind(ev, "say") ?? ev.type}:${ts}`
+  return `${eventKind(ev, "say") ?? ev.type}:${fallback}`
+}
+
+function pickTaskId(ev: ClineEvent): string | null {
+  const taskId = (ev as { taskId?: unknown }).taskId
+  return typeof taskId === "string" && taskId.length > 0 ? taskId : null
+}
+
+function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): ClineUsage | null {
+  const dataDir = clineDataDir(options)
+  const uiMessagesPath = join(dataDir, "tasks", taskId, "ui_messages.json")
+  if (!existsSync(uiMessagesPath)) return null
+  try {
+    const raw: unknown = JSON.parse(readFileSync(uiMessagesPath, "utf8"))
+    if (!Array.isArray(raw)) return null
+    const total = raw.reduce<ClineUsage>((acc, item) => {
+      if (!isRecord(item) || item["type"] !== "say") return acc
+      const say = item["say"]
+      if (say !== "api_req_started" && say !== "deleted_api_reqs" && say !== "subagent_usage") return acc
+      return addUsage(acc, pickUsage(item as ClineEvent))
+    }, emptyUsage())
+    return hasTokenUsage(total) ? total : null
+  } catch (err) {
+    if (DEBUG) process.stderr.write(`[cline-runner] failed to read persisted usage for task ${taskId}: ${String(err)}\n`)
+    return null
+  }
+}
+
+function clineDataDir(options: RunInput["options"]): string {
+  const args = options.extraArgs ?? []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    const next = args[i + 1]
+    if (arg === "--config" && typeof next === "string") return join(next, "data")
+    if (arg?.startsWith("--config=")) return join(arg.slice("--config=".length), "data")
+  }
+  const home = options.env?.["HOME"] ?? process.env["HOME"] ?? homedir()
+  return join(home, ".cline", "data")
+}
+
 function pickVisibleText(ev: ClineEvent): VisibleText | null {
   const say = eventKind(ev, "say")
   if (say === "reasoning") {
@@ -346,7 +490,7 @@ function pickVisibleText(ev: ClineEvent): VisibleText | null {
   }
   if (say !== null && VISIBLE_SAY_TEXT_KINDS.has(say)) {
     const text = pickText(ev)
-    return text === null ? null : { channel: visibleSayChannel(say), text }
+    return text === null ? null : { channel: visibleSayChannel(say), text: normalizeSayText(say, text) }
   }
 
   const ask = eventKind(ev, "ask")
@@ -376,6 +520,43 @@ function pickTextOrReasoning(ev: ClineEvent): string | null {
   if (text !== null) return text
   const reasoning = (ev as { reasoning?: unknown }).reasoning
   return typeof reasoning === "string" && reasoning.length > 0 ? reasoning : null
+}
+
+function normalizeSayText(kind: string, text: string): string {
+  if (kind === "tool") return formatToolText(text)
+  return text
+}
+
+function formatToolText(text: string): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return text
+  }
+  if (!isRecord(parsed)) return text
+
+  const tool = pickString(parsed, "tool") ?? "tool"
+  const path = pickString(parsed, "path")
+  const content = pickString(parsed, "content")
+  const header = path === null ? `[cline:${tool}]` : `[cline:${tool}] ${path}${formatLineRange(parsed)}`
+
+  if (tool === "readFile") return `${header}\n`
+  if (content === null || content.length === 0) return `${header}\n`
+  return `${header}\n${content}${content.endsWith("\n") ? "" : "\n"}`
+}
+
+function pickString(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key]
+  return typeof value === "string" && value.length > 0 ? value : null
+}
+
+function formatLineRange(source: Record<string, unknown>): string {
+  const start = pickNumber(source, ["readLineStart"])
+  const end = pickNumber(source, ["readLineEnd"])
+  if (start === undefined) return ""
+  if (end === undefined || end === start) return `:${start}`
+  return `:${start}-${end}`
 }
 
 function normalizeAskText(kind: string, text: string): string {

@@ -50,3 +50,7 @@ Subprocess mode delegates from opencode to cline, so responses can take longer t
 ## NDJSON Parse Warnings
 
 Unknown cline event lines are ignored unless they are known user-visible reasoning/text/output events. Run with `DEBUG=1` to inspect events.
+
+## Missing Usage
+
+OpenCode-AnyCLI reads token usage from cline JSON events first. If the cline CLI omits final usage updates from stdout, the provider falls back to `~/.cline/data/tasks/<taskId>/ui_messages.json`.

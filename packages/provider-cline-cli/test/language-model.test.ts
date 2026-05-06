@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest"
 import { EventEmitter } from "node:events"
 import { Readable } from "node:stream"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type { ChildProcessWithoutNullStreams } from "node:child_process"
 import { runOnce, runStream } from "../src/cline-runner.js"
 import { ClineLanguageModel } from "../src/language-model.js"
@@ -42,6 +45,17 @@ function makeFakeProc(stdoutLines: string[], opts: { exitCode?: number; delayMs?
 function fakeSpawn(stdoutLines: string[], opts?: { exitCode?: number }) {
   return ((_cmd: string, _args?: readonly string[], _options?: object) =>
     makeFakeProc(stdoutLines, opts ?? {}) as unknown as ChildProcessWithoutNullStreams) as unknown as typeof import("node:child_process").spawn
+}
+
+function zeroUsage() {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 0,
+    totalCost: undefined,
+  }
 }
 
 /**
@@ -136,7 +150,86 @@ describe("runOnce", () => {
       options: { command: "cline", timeoutMs: 5000 },
       spawnFn: fakeSpawn(out),
     })
-    expect(result.usage).toEqual({ inputTokens: 120, outputTokens: 30, totalTokens: 150 })
+    expect(result.usage).toEqual({ ...zeroUsage(), inputTokens: 120, outputTokens: 30, totalTokens: 150 })
+  })
+
+  it("harvests token counts from api_req_finished text JSON", async () => {
+    const out = [
+      '{"type":"task_started"}',
+      '{"type":"say","say":"api_req_finished","text":"{\\"tokensIn\\":120,\\"tokensOut\\":30,\\"cacheWrites\\":10,\\"cacheReads\\":5,\\"cost\\":0.25}"}',
+      '{"type":"say","say":"text","text":"ok","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheWriteTokens: 10,
+      cacheReadTokens: 5,
+      totalTokens: 165,
+      totalCost: 0.25,
+    })
+  })
+
+  it("harvests token counts from cline api_req_started updates", async () => {
+    const out = [
+      '{"type":"say","say":"api_req_started","ts":1,"text":"{\\"request\\":\\"prompt\\",\\"tokensIn\\":100,\\"tokensOut\\":20,\\"cacheReads\\":40}"}',
+      '{"type":"say","say":"api_req_started","ts":1,"text":"{\\"request\\":\\"prompt\\",\\"tokensIn\\":110,\\"tokensOut\\":30,\\"cacheReads\\":50}"}',
+      '{"type":"say","say":"text","text":"ok","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage).toEqual({
+      ...zeroUsage(),
+      inputTokens: 110,
+      outputTokens: 30,
+      cacheReadTokens: 50,
+      totalTokens: 190,
+    })
+  })
+
+  it("falls back to persisted cline task usage when stdout omits usage updates", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opencode-anycli-test-"))
+    try {
+      const taskDir = join(home, ".cline", "data", "tasks", "task-1")
+      mkdirSync(taskDir, { recursive: true })
+      writeFileSync(
+        join(taskDir, "ui_messages.json"),
+        JSON.stringify([
+          {
+            type: "say",
+            say: "api_req_started",
+            text: JSON.stringify({ request: "prompt", tokensIn: 100, tokensOut: 20, cacheWrites: 10, cacheReads: 5 }),
+          },
+        ]),
+      )
+      const out = [
+        '{"type":"task_started","taskId":"task-1"}',
+        '{"type":"say","say":"api_req_started","ts":1,"text":"{\\"request\\":\\"prompt\\"}"}',
+        '{"type":"say","say":"text","text":"ok","partial":false}',
+      ]
+      const result = await runOnce({
+        prompt: "ignored",
+        options: { command: "cline", timeoutMs: 5000, env: { HOME: home } },
+        spawnFn: fakeSpawn(out),
+      })
+      expect(result.usage).toEqual({
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheWriteTokens: 10,
+        cacheReadTokens: 5,
+        totalTokens: 135,
+        totalCost: undefined,
+      })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it("returns zero usage when api_req_finished is absent (does not fabricate)", async () => {
@@ -146,7 +239,7 @@ describe("runOnce", () => {
       options: { command: "cline", timeoutMs: 5000 },
       spawnFn: fakeSpawn(out),
     })
-    expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, totalTokens: 0 })
+    expect(result.usage).toEqual(zeroUsage())
   })
 
   it("counts parse errors but keeps going", async () => {
@@ -190,6 +283,30 @@ describe("runOnce", () => {
       spawnFn: fakeSpawn(out),
     })
     expect(result.text).toBe("line 1\nline 2\ndone")
+  })
+
+  it("surfaces cline tool activity for readFile events", async () => {
+    const out = [
+      '{"type":"say","say":"tool","text":"{\\"tool\\":\\"readFile\\",\\"path\\":\\"docs/configuration.md\\",\\"content\\":\\"/repo/docs/configuration.md\\",\\"readLineStart\\":1,\\"readLineEnd\\":32}","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toBe("[cline:readFile] docs/configuration.md:1-32\n")
+  })
+
+  it("surfaces cline tool output content for search/list events", async () => {
+    const out = [
+      '{"type":"say","say":"tool","text":"{\\"tool\\":\\"searchFiles\\",\\"path\\":\\"src\\",\\"content\\":\\"Found 1 result.\\\\nsrc/index.ts\\"}","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toBe("[cline:searchFiles] src\nFound 1 result.\nsrc/index.ts\n")
   })
 
   it("extracts human-facing ask text from cline ask payloads", async () => {
