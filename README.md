@@ -201,27 +201,6 @@ Notes:
   (observed for several non-Anthropic provider paths), the provider falls
   back to the per-assistant `metrics` block in `api_conversation_history.json`.
 
-## Ctrl+C handling
-
-Two layers, deliberately separated:
-
-- **Inside the opencode TUI** (terminal in raw mode) — Ctrl+C used to call
-  opencode's `app_exit` and quit the session immediately. The shipped
-  `templates/tui.json` rebinds `app_exit` to `ctrl+d, <leader>q`, so a stray
-  Ctrl+C in the TUI now only clears the input field. To leave the TUI,
-  type `:exit` / `:quit` / `:q` in the prompt (or press Ctrl+D).
-- **Outside the TUI** (boot window, `opencode-anycli run …` non-TUI mode,
-  errors, post-teardown — cooked-mode terminal where Ctrl+C is delivered
-  as a SIGINT signal) — the wrapper takes over with a double-press
-  guard: first Ctrl+C prints `^C — press Ctrl+C again within 2s to
-  exit`, second Ctrl+C within the window SIGTERMs the entire opencode +
-  cline subprocess group and exits the wrapper with code 130.
-
-The wrapper does NOT forward SIGINT to opencode (opencode has no
-SIGINT handler and would die immediately on the first press, defeating
-the guard). For in-TUI session interrupt of an active LLM call, use the
-keybind opencode binds to `session_interrupt` (default Escape).
-
 ## Auto-approve (Yolo Mode)
 
 opencode itself prompts for approval on file edits, bash commands, web

@@ -261,24 +261,6 @@ if [ ! -f "$AGENTS_TARGET" ]; then
   ok "AGENTS.md installed: $AGENTS_TARGET"
 fi
 
-# tui.json template — opencode reads this for keybind/theme overrides.
-# We ship one to remove ctrl+c from app_exit, so an accidental Ctrl+C in the
-# TUI no longer kills the session (users now exit via :exit / :quit / :q).
-TUI_TARGET="$CONFIG_DIR/tui.json"
-TUI_SOURCE="$REPO_DIR/templates/tui.json"
-if [ -f "$TUI_TARGET" ] && [ "$(cat "$TUI_TARGET")" = "$(cat "$TUI_SOURCE")" ]; then
-  ok "tui.json already up-to-date: $TUI_TARGET"
-elif [ -f "$TUI_TARGET" ]; then
-  BACKUP="$TUI_TARGET.bak.$(date +%s)"
-  cp "$TUI_TARGET" "$BACKUP"
-  warn "Existing tui.json differs; previous version backed up: $BACKUP"
-  cp "$TUI_SOURCE" "$TUI_TARGET"
-  ok "tui.json installed: $TUI_TARGET"
-else
-  cp "$TUI_SOURCE" "$TUI_TARGET"
-  ok "tui.json installed: $TUI_TARGET"
-fi
-
 # ─── 7. Symlink the CLI ───────────────────────────────────────────────────────
 step "Linking opencode-anycli binary"
 BIN_SRC="$REPO_DIR/packages/cli/bin/opencode-anycli"
