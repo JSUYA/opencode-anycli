@@ -24,16 +24,18 @@ USER_INSTALL=0
 SKIP_BUILD=0
 USE_SUDO=0
 NO_AUTO_DEPS=0
+NO_LSP_DEPS=0
 for arg in "$@"; do
   case "$arg" in
     --user) USER_INSTALL=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --sudo) USE_SUDO=1 ;;
     --no-auto-deps) NO_AUTO_DEPS=1 ;;
+    --no-lsp-deps) NO_LSP_DEPS=1 ;;
     --yes|-y) ;;            # accepted for backwards-compat; auto-install is now default
     -h|--help)
       cat <<EOF
-Usage: ./install.sh [--user] [--skip-build] [--sudo] [--no-auto-deps]
+Usage: ./install.sh [--user] [--skip-build] [--sudo] [--no-auto-deps] [--no-lsp-deps]
 
   opencode-anycli treats opencode + cline as bundled runtime dependencies.
   If either is missing, this installer fetches them via npm by default —
@@ -46,6 +48,11 @@ Usage: ./install.sh [--user] [--skip-build] [--sudo] [--no-auto-deps]
                    auto-installing opencode/cline globally
   --no-auto-deps   Air-gap mode: fail if opencode/cline are missing
                    instead of running 'npm install -g'
+  --no-lsp-deps    Skip auto-install of typescript-language-server.
+                   The right-hand "LSP" panel will stay empty for .ts/.tsx/.js
+                   files until you install it yourself. Other languages'
+                   LSPs (gopls, lua-ls, etc.) are unaffected — opencode
+                   downloads or installs those on first use.
 EOF
       exit 0 ;;
     *) err "Unknown arg: $arg"; exit 2 ;;
@@ -159,6 +166,31 @@ fi
 
 if [ ! -f "$HOME/.cline/data/globalState.json" ]; then
   warn "~/.cline/data/globalState.json not found; run cline once to finish setup."
+fi
+
+# ─── 4b. typescript-language-server (powers the right-hand LSP panel) ────────
+# Why this is here: opencode's read-tool pipeline calls LSP.touchFile(path)
+# every time a file is opened by the agent, which is what populates the
+# right-hand "LSP" panel ("LSPs will activate as files are read"). For most
+# languages opencode auto-downloads the server binary on first use (gopls,
+# lua-ls, terraform-ls, clangd, etc.), but the TypeScript LSP is special:
+# it spawns `typescript-language-server` from PATH and silently does
+# nothing if the binary is missing. Since this wrapper's primary userbase
+# tends to work in TS/JS repos, we install it here by default.
+#
+# Skip with `--no-lsp-deps` (or pass `--no-auto-deps` to refuse all
+# network-fetched runtime deps).
+step "typescript-language-server (LSP server for .ts/.tsx/.js)"
+if [ "$NO_LSP_DEPS" -eq 1 ] || [ "$NO_AUTO_DEPS" -eq 1 ]; then
+  warn "Skipping typescript-language-server install (--no-lsp-deps / --no-auto-deps)."
+  warn "  The right-hand LSP panel will stay empty until you install it manually."
+elif command -v typescript-language-server >/dev/null 2>&1; then
+  ok "typescript-language-server: $(typescript-language-server --version 2>&1 | head -n1)"
+else
+  info "typescript-language-server is what makes the right-hand LSP panel populate"
+  info "for .ts/.tsx/.js files; installing it now."
+  auto_npm_install typescript-language-server typescript-language-server "typescript-language-server" || \
+    warn "typescript-language-server install failed; LSP panel for TS/JS will stay empty."
 fi
 
 # ─── 5. Build the provider ────────────────────────────────────────────────────

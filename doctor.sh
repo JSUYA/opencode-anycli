@@ -89,6 +89,59 @@ else
   note "Run ./install.sh to install the default config."
 fi
 
+# ─── LSP (right-hand "LSP" panel) ────────────────────────────────────────────
+# Two things have to be true for the right-hand "LSPs will activate as files
+# are read" panel to populate when cline reads a file:
+#   1. the wrapper config has `lsp: true` (or an `lsp: {…}` map) so opencode
+#      doesn't disable its LSP service at startup with "all LSPs are disabled";
+#   2. for .ts / .tsx / .js files specifically, typescript-language-server
+#      must be on PATH (opencode does NOT auto-download this one).
+# Other languages' LSP servers are auto-downloaded by opencode on first use,
+# so we don't check those here.
+section "LSP panel ('LSPs will activate as files are read')"
+if [ -f "$OCC" ]; then
+  # `node` is already required upstream in this script; use it for a strict
+  # JSON check rather than fragile grep. Reports:
+  #   - "true"        → opencode auto-enables its bundled LSP set
+  #   - "false"/"missing" → opencode logs "all LSPs are disabled" at startup
+  #   - "object"      → user-customised LSP config; assumed intentional
+  LSP_FLAG="$(node -e "
+    try {
+      const c = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+      if (c.lsp === true) process.stdout.write('true');
+      else if (c.lsp === false) process.stdout.write('false');
+      else if (c.lsp === undefined || c.lsp === null) process.stdout.write('missing');
+      else if (typeof c.lsp === 'object') process.stdout.write('object');
+      else process.stdout.write('other');
+    } catch { process.stdout.write('error'); }
+  " "$OCC" 2>/dev/null)"
+  case "$LSP_FLAG" in
+    true)    ok 'config has "lsp": true (LSP panel will populate)' ;;
+    object)  ok 'config has "lsp": {…} (custom LSP map; assumed intentional)' ;;
+    false)   nope 'config has "lsp": false → LSP panel will never populate'
+             note "Edit $OCC and set \"lsp\": true." ;;
+    missing) nope 'config has no "lsp" key → opencode disables all LSPs by default'
+             note "Edit $OCC and add \"lsp\": true (top-level), or rerun ./install.sh." ;;
+    other|error)
+             warn "could not determine the lsp setting in $OCC" ;;
+  esac
+else
+  warn "skipping (config file missing — see check above)"
+fi
+
+if command -v typescript-language-server >/dev/null 2>&1; then
+  TLS_VER="$(typescript-language-server --version 2>&1 | head -n1)"
+  ok "typescript-language-server: $TLS_VER"
+  note "$(command -v typescript-language-server)"
+else
+  nope "typescript-language-server not on PATH"
+  note "Without it, .ts/.tsx/.js reads will not show up in the LSP panel."
+  note "Install: npm install -g typescript-language-server"
+  note "(or rerun ./install.sh — it auto-installs unless --no-lsp-deps is set)"
+fi
+note "LSPs for other languages (gopls, lua-ls, terraform-ls, clangd, …) are"
+note "downloaded by opencode on first use; no setup needed here."
+
 # ─── Privileged-command escape hatch ─────────────────────────────────────────
 section "Privileged commands inside sessions"
 if command -v sudo >/dev/null 2>&1; then

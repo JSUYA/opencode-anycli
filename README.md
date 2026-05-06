@@ -69,6 +69,7 @@ Optional flags:
 | `--sudo` | Use sudo for `/usr/local/bin` symlink AND for the npm install fallback if your prefix needs root |
 | `--skip-build` | Skip the workspace build step (re-install on existing checkout) |
 | `--no-auto-deps` | Air-gap mode: fail if opencode/cline are missing instead of fetching them |
+| `--no-lsp-deps` | Skip auto-install of `typescript-language-server` (otherwise installed so the right-hand LSP panel populates for `.ts`/`.tsx`/`.js` files) |
 
 After installation, run:
 
