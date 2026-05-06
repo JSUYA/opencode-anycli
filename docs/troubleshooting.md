@@ -49,4 +49,4 @@ Subprocess mode delegates from opencode to cline, so responses can take longer t
 
 ## NDJSON Parse Warnings
 
-Unknown cline event lines are ignored unless they affect final text extraction. Run with `DEBUG=1` to inspect events.
+Unknown cline event lines are ignored unless they are known user-visible reasoning/text/output events. Run with `DEBUG=1` to inspect events.

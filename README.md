@@ -237,7 +237,7 @@ opencode -> provider-cline-cli -> cline CLI -> configured model
    +---------------- assistant text
 ```
 
-The adapter implements the Vercel AI SDK v3 `LanguageModelV3` interface expected by opencode. It starts cline as a subprocess, parses cline's NDJSON event stream, and returns the final assistant text to opencode.
+The adapter implements the Vercel AI SDK v3 `LanguageModelV3` interface expected by opencode. It starts cline as a subprocess, parses cline's NDJSON event stream, and forwards cline's visible reasoning/text/output events to opencode.
 
 ## Modes
 

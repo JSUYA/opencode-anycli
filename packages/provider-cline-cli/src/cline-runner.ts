@@ -12,18 +12,51 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import {
   createNdjsonSplitter,
   parseLine,
-  isSayText,
-  isSayCompletion,
-  isSayReasoning,
   isApiReqFinished,
   isApiReqStarted,
   isTaskStarted,
-  isPartial,
   pickText,
 } from "./ndjson-parser.js"
 import type { ClineEvent, RunResult } from "./types.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
+
+const VISIBLE_SAY_TEXT_KINDS = new Set([
+  "text",
+  "completion_result",
+  "command_output",
+  "error",
+  "error_retry",
+  "diff_error",
+  "clineignore_error",
+  "hook_status",
+  "info",
+  "shell_integration_warning",
+  "shell_integration_warning_with_suggestion",
+  "checkpoint_created",
+  "load_mcp_documentation",
+  "mcp_notification",
+  "deleted_api_reqs",
+  "api_req_retried",
+  "command_permission_denied",
+  "generate_explanation",
+  "conditional_rules_applied",
+])
+
+const VISIBLE_ASK_TEXT_KINDS = new Set([
+  "followup",
+  "plan_mode_respond",
+  "completion_result",
+  "resume_task",
+  "resume_completed_task",
+  "new_task",
+  "condense",
+  "summarize_task",
+  "report_bug",
+  "api_req_failed",
+  "mistake_limit_reached",
+  "command_output",
+])
 
 export interface RunInput {
   prompt: string
@@ -46,6 +79,11 @@ export type StreamEvent =
   | { type: "text-delta"; delta: string }
   | { type: "finish"; usage: RunResult["usage"]; parseErrors: number }
   | { type: "error"; error: Error }
+
+type VisibleText = {
+  channel: string
+  text: string
+}
 
 /** Build the CLI arg list for cline. */
 export function buildClineArgs(prompt: string, extraArgs: readonly string[] = []): string[] {
@@ -149,18 +187,19 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // `partial:true` then a `partial:false` version, and often a final
   // `completion_result` that duplicates it. We emit only the new tail relative
   // to everything already streamed, so consumers get a single coherent stream.
-  let totalEmitted = ""
+  const emittedByChannel = new Map<string, string>()
   let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 }
   let parseErrors = 0
 
-  function emitTextIfNew(text: string) {
+  function emitTextIfNew(channel: string, text: string) {
     if (text.length === 0) return
+    const totalEmitted = emittedByChannel.get(channel) ?? ""
     // Common case: this text extends what we've already streamed (cline partial → final).
     if (text.startsWith(totalEmitted)) {
       const delta = text.slice(totalEmitted.length)
       if (delta.length > 0) {
         enqueue({ type: "text-delta", delta })
-        totalEmitted = text
+        emittedByChannel.set(channel, text)
       }
       return
     }
@@ -169,7 +208,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     // a fresh segment and reset the running prefix to it — never append, which
     // would risk double-emission if the same prefix arrives again.
     enqueue({ type: "text-delta", delta: text })
-    totalEmitted = text
+    emittedByChannel.set(channel, text)
   }
 
   const splitter = createNdjsonSplitter()
@@ -191,7 +230,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   }
 
   function handleEvent(ev: ClineEvent) {
-    if (isTaskStarted(ev) || isApiReqStarted(ev) || isSayReasoning(ev)) {
+    if (isTaskStarted(ev) || isApiReqStarted(ev)) {
       // ignore
       return
     }
@@ -205,12 +244,9 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       }
       return
     }
-    if (isSayText(ev)) {
-      emitTextIfNew(pickText(ev) ?? "")
-      return
-    }
-    if (isSayCompletion(ev)) {
-      emitTextIfNew(pickText(ev) ?? "")
+    const visibleText = pickVisibleText(ev)
+    if (visibleText !== null) {
+      emitTextIfNew(visibleText.channel, visibleText.text)
       return
     }
     // Unknown event type — defensive ignore.
@@ -300,4 +336,58 @@ function wrapErr(err: unknown, prefix: string): Error {
     return e
   }
   return new Error(`${prefix}: ${String(err)}`)
+}
+
+function pickVisibleText(ev: ClineEvent): VisibleText | null {
+  const say = eventKind(ev, "say")
+  if (say === "reasoning") {
+    const text = pickTextOrReasoning(ev)
+    return text === null ? null : { channel: "reasoning", text }
+  }
+  if (say !== null && VISIBLE_SAY_TEXT_KINDS.has(say)) {
+    const text = pickText(ev)
+    return text === null ? null : { channel: visibleSayChannel(say), text }
+  }
+
+  const ask = eventKind(ev, "ask")
+  if (ask !== null && VISIBLE_ASK_TEXT_KINDS.has(ask)) {
+    const text = pickText(ev)
+    return text === null ? null : { channel: visibleAskChannel(ask), text: normalizeAskText(ask, text) }
+  }
+
+  return null
+}
+
+function visibleSayChannel(kind: string): string {
+  return kind === "text" || kind === "completion_result" ? "assistant" : `say:${kind}`
+}
+
+function visibleAskChannel(kind: string): string {
+  return kind === "completion_result" ? "assistant" : `ask:${kind}`
+}
+
+function eventKind(ev: ClineEvent, field: "say" | "ask"): string | null {
+  const value = (ev as { say?: unknown; ask?: unknown })[field]
+  return ev.type === field && typeof value === "string" ? value : null
+}
+
+function pickTextOrReasoning(ev: ClineEvent): string | null {
+  const text = pickText(ev)
+  if (text !== null) return text
+  const reasoning = (ev as { reasoning?: unknown }).reasoning
+  return typeof reasoning === "string" && reasoning.length > 0 ? reasoning : null
+}
+
+function normalizeAskText(kind: string, text: string): string {
+  if (kind !== "followup" && kind !== "plan_mode_respond") return text
+
+  try {
+    const parsed = JSON.parse(text) as { question?: unknown; response?: unknown }
+    if (kind === "followup" && typeof parsed.question === "string") return parsed.question
+    if (kind === "plan_mode_respond" && typeof parsed.response === "string") return parsed.response
+  } catch {
+    // Not all cline ask payloads are JSON; fall through to the original text.
+  }
+
+  return text
 }

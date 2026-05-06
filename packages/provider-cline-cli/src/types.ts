@@ -28,8 +28,10 @@ export interface ClineProviderOptions {
 export type ClineEvent =
   | { type: "task_started"; taskId?: string }
   | { type: "say"; say: "text"; text?: string; partial?: boolean }
-  | { type: "say"; say: "reasoning"; text?: string; partial?: boolean }
+  | { type: "say"; say: "reasoning"; text?: string; reasoning?: string; partial?: boolean }
   | { type: "say"; say: "completion_result"; text?: string; partial?: boolean }
+  | { type: "say"; say: string; text?: string; reasoning?: string; partial?: boolean; commandCompleted?: boolean }
+  | { type: "ask"; ask: string; text?: string; partial?: boolean }
   | { type: "say"; say: "api_req_started"; text?: string }
   | { type: "say"; say: "api_req_finished"; tokensIn?: number; tokensOut?: number; cost?: number }
   | { type: string; [key: string]: unknown }

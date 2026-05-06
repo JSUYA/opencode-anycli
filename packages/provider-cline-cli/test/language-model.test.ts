@@ -163,7 +163,7 @@ describe("runOnce", () => {
     expect(result.parseErrors).toBe(1)
   })
 
-  it("ignores reasoning, api_req_started, task_started events", async () => {
+  it("surfaces reasoning while still ignoring internal api/task events", async () => {
     const out = [
       '{"type":"task_started"}',
       '{"type":"say","say":"reasoning","text":"thinking..."}',
@@ -175,8 +175,44 @@ describe("runOnce", () => {
       options: { command: "cline", timeoutMs: 5000 },
       spawnFn: fakeSpawn(out),
     })
-    expect(result.text).toBe("final")
-    expect(result.text).not.toContain("thinking")
+    expect(result.text).toBe("thinking...final")
+    expect(result.text).not.toContain("prompt sent")
+  })
+
+  it("surfaces visible cline output text events", async () => {
+    const out = [
+      '{"type":"say","say":"command_output","text":"line 1\\nline 2\\n","partial":false}',
+      '{"type":"say","say":"info","text":"done","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toBe("line 1\nline 2\ndone")
+  })
+
+  it("extracts human-facing ask text from cline ask payloads", async () => {
+    const out = [
+      '{"type":"ask","ask":"followup","text":"{\\"question\\":\\"Need input?\\"}","partial":false}',
+      '{"type":"ask","ask":"plan_mode_respond","text":"{\\"response\\":\\"Plan text\\"}","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toBe("Need input?Plan text")
+  })
+
+  it("reads reasoning from cline's reasoning field when text is absent", async () => {
+    const out = ['{"type":"say","say":"reasoning","reasoning":"thinking field"}']
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toBe("thinking field")
   })
 
   it("rejects when cline exits non-zero", async () => {
