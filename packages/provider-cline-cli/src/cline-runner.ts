@@ -237,9 +237,14 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // to everything already streamed, so consumers get a single coherent stream.
   const emittedByChannel = new Map<string, string>()
   let taskId: string | null = null
+  // Each api_req_started / api_req_finished entry is a snapshot of the
+  // SAME conversation's tokens after one API call. Some cline configs emit
+  // both started and finished for the same call, or fire partial then
+  // final variants — summing them inflates the count by 2× / 3×, which
+  // showed up as "single-word prompt at 25% context" in the TUI. We track
+  // the latest snapshot by `ts` instead and use that as the run's usage.
   let usage = emptyUsage()
-  const usageSnapshots = new Map<string, ClineUsage>()
-  let anonymousUsageEvents = 0
+  let latestUsageTs = -1
   let parseErrors = 0
 
   function emitTextIfNew(channel: string, text: string) {
@@ -280,14 +285,13 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     }
   }
 
-  function recomputeUsage() {
-    usage = [...usageSnapshots.values()].reduce(addUsage, emptyUsage())
-  }
-
-  function setUsageSnapshot(key: string, next: ClineUsage) {
+  function maybeUpdateUsage(ev: ClineEvent, next: ClineUsage) {
     if (!hasTokenUsage(next)) return
-    usageSnapshots.set(key, next)
-    recomputeUsage()
+    const ts = (ev as { ts?: unknown }).ts
+    const tsNum = typeof ts === "number" ? ts : latestUsageTs + 1
+    if (tsNum < latestUsageTs) return
+    latestUsageTs = tsNum
+    usage = next
   }
 
   // Track readFile tool-calls we've already surfaced so partial→final
@@ -299,14 +303,8 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       taskId = pickTaskId(ev) ?? taskId
       return
     }
-    if (isApiReqStarted(ev)) {
-      const eventUsage = pickUsage(ev)
-      if (hasTokenUsage(eventUsage)) setUsageSnapshot(usageKey(ev, anonymousUsageEvents++), eventUsage)
-      return
-    }
-    if (isApiReqFinished(ev)) {
-      const eventUsage = pickUsage(ev)
-      if (hasTokenUsage(eventUsage)) setUsageSnapshot(usageKey(ev, anonymousUsageEvents++), eventUsage)
+    if (isApiReqStarted(ev) || isApiReqFinished(ev)) {
+      maybeUpdateUsage(ev, pickUsage(ev))
       return
     }
     // Surface cline's readFile activity as a structured tool-call so opencode's
@@ -438,21 +436,6 @@ function emptyUsage(): ClineUsage {
   }
 }
 
-function addUsage(total: ClineUsage, next: ClineUsage): ClineUsage {
-  const totalCost =
-    total.totalCost === undefined && next.totalCost === undefined
-      ? undefined
-      : (total.totalCost ?? 0) + (next.totalCost ?? 0)
-  return finalizeUsage({
-    inputTokens: total.inputTokens + next.inputTokens,
-    outputTokens: total.outputTokens + next.outputTokens,
-    cacheWriteTokens: total.cacheWriteTokens + next.cacheWriteTokens,
-    cacheReadTokens: total.cacheReadTokens + next.cacheReadTokens,
-    totalTokens: 0,
-    totalCost,
-  })
-}
-
 function finalizeUsage(usage: ClineUsage): ClineUsage {
   return {
     ...usage,
@@ -509,12 +492,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
-function usageKey(ev: ClineEvent, fallback: number): string {
-  const ts = (ev as { ts?: unknown }).ts
-  if (typeof ts === "number") return `${eventKind(ev, "say") ?? ev.type}:${ts}`
-  return `${eventKind(ev, "say") ?? ev.type}:${fallback}`
-}
-
 function pickTaskId(ev: ClineEvent): string | null {
   const taskId = (ev as { taskId?: unknown }).taskId
   return typeof taskId === "string" && taskId.length > 0 ? taskId : null
@@ -524,22 +501,28 @@ function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): C
   const dataDir = clineDataDir(options)
   const taskDir = join(dataDir, "tasks", taskId)
 
-  // Primary source: ui_messages.json. Each api_req_started entry has a `text`
-  // field whose JSON includes tokensIn / tokensOut / cacheReads / cacheWrites
-  // / cost. Some cline providers (e.g. openai-codex/gpt-5.5 locally) populate
-  // every field; others leave token counts off.
+  // Primary source: ui_messages.json. Each api_req_started entry is a
+  // snapshot of the cline conversation's tokens AFTER the corresponding
+  // API call — they are NOT independent calls to be summed (summing
+  // double-counts when cline emits both api_req_started and api_req_finished
+  // for the same call, or partial-then-final). Pick the entry with the
+  // largest ts that carries token info.
   const uiMessagesPath = join(taskDir, "ui_messages.json")
   if (existsSync(uiMessagesPath)) {
     try {
       const raw: unknown = JSON.parse(readFileSync(uiMessagesPath, "utf8"))
       if (Array.isArray(raw)) {
-        const total = raw.reduce<ClineUsage>((acc, item) => {
-          if (!isRecord(item) || item["type"] !== "say") return acc
+        let best: { ts: number; usage: ClineUsage } | null = null
+        for (const item of raw) {
+          if (!isRecord(item) || item["type"] !== "say") continue
           const say = item["say"]
-          if (say !== "api_req_started" && say !== "deleted_api_reqs" && say !== "subagent_usage") return acc
-          return addUsage(acc, pickUsage(item as ClineEvent))
-        }, emptyUsage())
-        if (hasTokenUsage(total)) return total
+          if (say !== "api_req_started" && say !== "deleted_api_reqs" && say !== "subagent_usage") continue
+          const u = pickUsage(item as ClineEvent)
+          if (!hasTokenUsage(u)) continue
+          const ts = typeof item["ts"] === "number" ? (item["ts"] as number) : 0
+          if (best === null || ts >= best.ts) best = { ts, usage: u }
+        }
+        if (best !== null) return best.usage
       }
     } catch (err) {
       if (DEBUG) process.stderr.write(`[cline-runner] failed to read ui_messages for task ${taskId}: ${String(err)}\n`)
@@ -549,36 +532,38 @@ function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): C
   // Fallback: api_conversation_history.json. Cline writes per-assistant
   // metrics there (`metrics.tokens.{prompt,completion,cached}`, `metrics.cost`)
   // even when the api_req_started entry in ui_messages.json lacks usage —
-  // observed for several non-Anthropic provider paths. This is what saves
-  // the "0 tokens" display for those models.
+  // observed for several non-Anthropic provider paths. Same "take the
+  // latest" rule applies: each assistant message's metrics reflect the
+  // tokens for THAT API call, and we want the final state.
   const apiHistoryPath = join(taskDir, "api_conversation_history.json")
   if (existsSync(apiHistoryPath)) {
     try {
       const raw: unknown = JSON.parse(readFileSync(apiHistoryPath, "utf8"))
       if (Array.isArray(raw)) {
-        const total = raw.reduce<ClineUsage>((acc, item) => {
-          if (!isRecord(item) || item["role"] !== "assistant") return acc
+        let best: { ts: number; usage: ClineUsage } | null = null
+        for (const item of raw) {
+          if (!isRecord(item) || item["role"] !== "assistant") continue
           const metrics = item["metrics"]
-          if (!isRecord(metrics)) return acc
+          if (!isRecord(metrics)) continue
           const tokens = isRecord(metrics["tokens"]) ? metrics["tokens"] : null
-          if (!tokens) return acc
+          if (!tokens) continue
           const promptTokens = pickNumber(tokens, ["prompt"]) ?? 0
           const completionTokens = pickNumber(tokens, ["completion"]) ?? 0
           const cachedTokens = pickNumber(tokens, ["cached"]) ?? 0
           const cost = pickNumber(metrics, ["cost"])
-          return addUsage(
-            acc,
-            finalizeUsage({
-              inputTokens: promptTokens,
-              outputTokens: completionTokens,
-              cacheWriteTokens: 0,
-              cacheReadTokens: cachedTokens,
-              totalTokens: 0,
-              totalCost: cost,
-            }),
-          )
-        }, emptyUsage())
-        if (hasTokenUsage(total)) return total
+          const u = finalizeUsage({
+            inputTokens: promptTokens,
+            outputTokens: completionTokens,
+            cacheWriteTokens: 0,
+            cacheReadTokens: cachedTokens,
+            totalTokens: 0,
+            totalCost: cost,
+          })
+          if (!hasTokenUsage(u)) continue
+          const ts = typeof item["ts"] === "number" ? (item["ts"] as number) : 0
+          if (best === null || ts >= best.ts) best = { ts, usage: u }
+        }
+        if (best !== null) return best.usage
       }
     } catch (err) {
       if (DEBUG)

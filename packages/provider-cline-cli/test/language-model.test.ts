@@ -174,10 +174,13 @@ describe("runOnce", () => {
     })
   })
 
-  it("harvests token counts from cline api_req_started updates", async () => {
+  it("harvests latest tokens from cline api_req_started updates (does not sum)", async () => {
+    // Two snapshots in stream order — the latest one wins. cline emits the
+    // same call's usage multiple times (e.g. partial/final or
+    // started/finished pair), and summing inflates the count by 2× / 3×.
     const out = [
       '{"type":"say","say":"api_req_started","ts":1,"text":"{\\"request\\":\\"prompt\\",\\"tokensIn\\":100,\\"tokensOut\\":20,\\"cacheReads\\":40}"}',
-      '{"type":"say","say":"api_req_started","ts":1,"text":"{\\"request\\":\\"prompt\\",\\"tokensIn\\":110,\\"tokensOut\\":30,\\"cacheReads\\":50}"}',
+      '{"type":"say","say":"api_req_started","ts":2,"text":"{\\"request\\":\\"prompt\\",\\"tokensIn\\":110,\\"tokensOut\\":30,\\"cacheReads\\":50}"}',
       '{"type":"say","say":"text","text":"ok","partial":false}',
     ]
     const result = await runOnce({
@@ -192,6 +195,24 @@ describe("runOnce", () => {
       cacheReadTokens: 50,
       totalTokens: 190,
     })
+  })
+
+  it("does NOT sum api_req_started + api_req_finished snapshots for the same call", async () => {
+    // Repro for the "single-word prompt at 25%" inflation: cline configs
+    // that emit BOTH events with the same numbers used to double-count.
+    const out = [
+      '{"type":"say","say":"api_req_started","ts":1,"text":"{\\"tokensIn\\":7976,\\"tokensOut\\":538,\\"cacheReads\\":6144}"}',
+      '{"type":"say","say":"api_req_finished","ts":2,"text":"{\\"tokensIn\\":7976,\\"tokensOut\\":538,\\"cacheReads\\":6144}"}',
+      '{"type":"say","say":"text","text":"ok","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage.inputTokens).toBe(7976)
+    expect(result.usage.outputTokens).toBe(538)
+    expect(result.usage.cacheReadTokens).toBe(6144)
   })
 
   it("falls back to persisted cline task usage when stdout omits usage updates", async () => {
@@ -232,6 +253,35 @@ describe("runOnce", () => {
     }
   })
 
+  it("uses the latest persisted api_req_started entry, not a sum", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opencode-anycli-test-"))
+    try {
+      const taskDir = join(home, ".cline", "data", "tasks", "task-3")
+      mkdirSync(taskDir, { recursive: true })
+      writeFileSync(
+        join(taskDir, "ui_messages.json"),
+        JSON.stringify([
+          { type: "say", say: "api_req_started", ts: 100, text: JSON.stringify({ tokensIn: 50, tokensOut: 10 }) },
+          { type: "say", say: "api_req_started", ts: 200, text: JSON.stringify({ tokensIn: 80, tokensOut: 25, cacheReads: 30 }) },
+        ]),
+      )
+      const out = [
+        '{"type":"task_started","taskId":"task-3"}',
+        '{"type":"say","say":"text","text":"ok","partial":false}',
+      ]
+      const result = await runOnce({
+        prompt: "ignored",
+        options: { command: "cline", timeoutMs: 5000, env: { HOME: home } },
+        spawnFn: fakeSpawn(out),
+      })
+      expect(result.usage.inputTokens).toBe(80)
+      expect(result.usage.outputTokens).toBe(25)
+      expect(result.usage.cacheReadTokens).toBe(30)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   it("falls back to api_conversation_history metrics when ui_messages lacks usage", async () => {
     const home = mkdtempSync(join(tmpdir(), "opencode-anycli-test-"))
     try {
@@ -255,13 +305,15 @@ describe("runOnce", () => {
           { role: "user", content: [{ type: "text", text: "hi" }] },
           {
             role: "assistant",
+            ts: 100,
             content: [{ type: "text", text: "hello" }],
             metrics: { tokens: { prompt: 200, completion: 40, cached: 80 }, cost: 0.012 },
           },
           {
             role: "assistant",
+            ts: 200,
             content: [{ type: "text", text: "follow-up" }],
-            metrics: { tokens: { prompt: 50, completion: 10, cached: 20 }, cost: 0.003 },
+            metrics: { tokens: { prompt: 250, completion: 50, cached: 100 }, cost: 0.015 },
           },
         ]),
       )
@@ -274,6 +326,7 @@ describe("runOnce", () => {
         options: { command: "cline", timeoutMs: 5000, env: { HOME: home } },
         spawnFn: fakeSpawn(out),
       })
+      // Latest assistant entry (ts=200) wins; we do NOT sum across calls.
       expect(result.usage).toEqual({
         inputTokens: 250,
         outputTokens: 50,
