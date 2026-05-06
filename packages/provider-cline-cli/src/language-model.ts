@@ -136,26 +136,6 @@ export class ClineLanguageModel implements LanguageModelV3 {
           })) {
             if (ev.type === "text-delta") {
               controller.enqueue({ type: "text-delta", id: textBlockId, delta: ev.delta })
-            } else if (ev.type === "tool-call") {
-              // Surface cline's file reads to opencode as a provider-executed
-              // `read` tool-call so the conversation timeline shows a "Read
-              // <path>" entry and opencode's LSP pipeline gets a chance to
-              // warm up the matching language server for that file.
-              controller.enqueue({
-                type: "tool-call",
-                toolCallId: ev.toolCallId,
-                toolName: ev.toolName,
-                input: JSON.stringify(ev.input),
-                providerExecuted: true,
-              })
-            } else if (ev.type === "tool-result") {
-              controller.enqueue({
-                type: "tool-result",
-                toolCallId: ev.toolCallId,
-                toolName: ev.toolName,
-                result: ev.result as NonNullable<import("@ai-sdk/provider").JSONValue>,
-                ...(ev.isError === true ? { isError: true } : {}),
-              })
             } else if (ev.type === "finish") {
               usage = ev.usage
               parseErrors = ev.parseErrors
