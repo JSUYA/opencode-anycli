@@ -38,3 +38,7 @@ coverage/
 # Temp
 .tmp/
 .cache/
+
+# Lockfile is regenerated on every npm install / install.sh run; tracking
+# it churns the diff with no useful signal and breaks --update auto-stash.
+package-lock.json
