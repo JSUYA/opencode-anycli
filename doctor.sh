@@ -158,6 +158,56 @@ else
   esac
 fi
 
+# ─── opencode runtime state ──────────────────────────────────────────────────
+# Two known startup blockers we can detect cheaply:
+#   1. Files in ~/.local/share/opencode/, ~/.config/opencode-anycli/, or
+#      ~/.cline/data/ that ended up owned by root after a past
+#      --allow-dangerously-skip-permissions session — every later EACCES
+#      write fails the user back to a "DB error" without explanation.
+#   2. The opencode SQLite database itself failing PRAGMA integrity_check
+#      (the "DrizzleError: Failed to run the query 'PRAGMA wal_checkpoint(PASSIVE)'"
+#      error users sometimes hit after a hard kill / disk-full / power loss).
+# Both are recoverable via `opencode-anycli --fix` so we point at it.
+section "opencode runtime state"
+
+DIRS_TO_CHECK="$HOME/.local/share/opencode $HOME/.config/opencode-anycli $HOME/.cline/data"
+BAD_OWNER_FOUND=0
+for d in $DIRS_TO_CHECK; do
+  [ -d "$d" ] || continue
+  badcount=$(find "$d" -not -user "$USER" 2>/dev/null | wc -l)
+  if [ "$badcount" -gt 0 ]; then
+    nope "$badcount file(s) in $d not owned by $USER"
+    BAD_OWNER_FOUND=1
+  fi
+done
+if [ "$BAD_OWNER_FOUND" = "0" ]; then
+  ok "no foreign-owned files in opencode/cline data dirs"
+else
+  note "Run 'opencode-anycli --fix' to reclaim with sudo chown."
+fi
+
+DB_FILE="$HOME/.local/share/opencode/opencode.db"
+if [ -f "$DB_FILE" ]; then
+  if ! [ -r "$DB_FILE" ] || ! [ -w "$DB_FILE" ]; then
+    nope "$DB_FILE is not readable/writable by $USER"
+    note "Run 'opencode-anycli --fix' to repair."
+  elif command -v sqlite3 >/dev/null 2>&1; then
+    DB_CHECK="$(sqlite3 "$DB_FILE" "PRAGMA integrity_check;" 2>&1 | head -1)"
+    if [ "$DB_CHECK" = "ok" ]; then
+      ok "opencode.db integrity_check: ok"
+    else
+      nope "opencode.db integrity_check failed: $DB_CHECK"
+      note "Run 'opencode-anycli --fix' to back up and regenerate."
+    fi
+  else
+    warn "sqlite3 not on PATH; cannot verify $DB_FILE"
+    note "Install sqlite3 ('apt install sqlite3' / 'brew install sqlite3')"
+    note "to let doctor detect DB corruption."
+  fi
+else
+  ok "opencode.db not yet created (fresh install) — will be made on first run"
+fi
+
 # ─── Smoke test ───────────────────────────────────────────────────────────────
 section "Smoke test (cline → 'doctor ok')"
 if command -v cline >/dev/null 2>&1; then

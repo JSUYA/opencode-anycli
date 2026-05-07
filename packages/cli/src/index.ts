@@ -23,6 +23,8 @@ interface Args {
   config?: string | undefined
   init?: boolean | undefined
   doctor?: boolean | undefined
+  fix?: boolean | undefined
+  fixYes?: boolean | undefined
   update?: boolean | undefined
   version?: boolean | undefined
   help?: boolean | undefined
@@ -52,6 +54,16 @@ function parseArgs(argv: readonly string[]): Args {
         break
       case "--doctor":
         out.doctor = true
+        break
+      case "--fix":
+        out.fix = true
+        break
+      case "--fix-yes":
+        // Bundle of --fix --yes (skip-confirm). Useful for scripts /
+        // CI / docker images that want a one-shot recovery without
+        // interactive prompts.
+        out.fix = true
+        out.fixYes = true
         break
       case "--update":
         // Everything AFTER --update is forwarded to install.sh as-is, so the
@@ -122,6 +134,16 @@ Flags:
   --config <path>          Use a specific opencode.json (default: ${defaultConfigPath()})
   --init                   (Re)create the default config from the bundled template
   --doctor                 Run the diagnostic script and exit
+  --fix                    Interactive recovery for known broken
+                           states: foreign-owned files in opencode /
+                           cline data dirs (left over from past
+                           --allow-dangerously-skip-permissions runs),
+                           a corrupt opencode SQLite DB (PRAGMA
+                           wal_checkpoint failure on startup), and
+                           root-owned entries in ~/.npm/_cacache.
+                           Each step prompts before changing anything.
+  --fix-yes                --fix with every prompt auto-confirmed.
+                           For scripted recovery / CI / containers.
   --update […install.sh args]
                            Auto-stash any uncommitted local changes
                            (tracked + untracked), git pull --ff-only inside
@@ -185,6 +207,17 @@ function runDoctor(): never {
     process.exit(2)
   }
   const r = spawnSync("bash", [scriptPath], { stdio: "inherit" })
+  process.exit(r.status ?? 1)
+}
+
+function runFix(autoYes: boolean): never {
+  const scriptPath = locateRepoArtifact("fix.sh")
+  if (!scriptPath) {
+    process.stderr.write("fix.sh not found in this checkout. Run from the repo root.\n")
+    process.exit(2)
+  }
+  const args = autoYes ? [scriptPath, "--yes"] : [scriptPath]
+  const r = spawnSync("bash", args, { stdio: "inherit" })
   process.exit(r.status ?? 1)
 }
 
@@ -380,6 +413,9 @@ async function main(): Promise<void> {
   }
   if (args.doctor) {
     runDoctor()
+  }
+  if (args.fix) {
+    runFix(!!args.fixYes)
   }
   if (args.update) {
     runUpdate(args.passthrough)

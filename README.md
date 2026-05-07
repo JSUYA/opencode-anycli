@@ -315,6 +315,33 @@ The adapter implements the Vercel AI SDK v3 `LanguageModelV3` interface expected
 - `subprocess`: implemented. Uses cline as a subprocess and preserves cline tool behavior.
 - `passthrough`: planned. Would read cline settings and call the model directly from opencode.
 
+## Diagnostics & recovery
+
+```bash
+opencode-anycli --doctor      # read-only diagnostic
+opencode-anycli --fix         # interactive recovery (each step prompts)
+opencode-anycli --fix-yes     # --fix with auto-confirm (CI / scripts)
+```
+
+`--doctor` reports node / opencode / cline versions, the LSP panel
+prerequisites, and now also flags two known startup blockers:
+
+- foreign-owned files inside `~/.local/share/opencode/`,
+  `~/.config/opencode-anycli/`, or `~/.cline/data/` (almost always
+  left over from a past `--allow-dangerously-skip-permissions`
+  session that ran the whole TUI as root with `HOME=$HOME`); and
+- a corrupt opencode SQLite database — the symptom users actually
+  see is the `DrizzleError: Failed to run the query 'PRAGMA
+  wal_checkpoint(PASSIVE)'` JSON dump on startup.
+
+`--fix` walks each detected case in turn with a single `[y/N]`
+prompt: `sudo chown -R` to reclaim ownership, and a backup-then-move
+on the broken `opencode.db` (no session history is silently
+deleted; the file is preserved as `opencode.db.broken.<ts>` and
+opencode regenerates an empty DB on the next launch). It also
+covers the npm cache pollution case (`~/.npm/_cacache` entries
+owned by root — typically blocks `npm install` inside `install.sh`).
+
 ## Companion Project
 
 [Oh-My-AnyCLI](https://github.com/JSUYA/oh-my-anycli) adds reusable skills, slash commands, subagents, and plugins on top of OpenCode-AnyCLI.
