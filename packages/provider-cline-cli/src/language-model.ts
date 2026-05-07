@@ -99,6 +99,20 @@ export class ClineLanguageModel implements LanguageModelV3 {
     }
 
     const promptText = flattenPrompt({ prompt: options.prompt as ReadonlyArray<unknown> })
+    // Diagnostic: dump the prompt array opencode handed us BEFORE flatten,
+    // so we can tell whether newlines were stripped upstream (in opencode)
+    // or by our flatten (which preserves them by construction). Gated by
+    // env var so production runs incur zero cost.
+    if (process.env["OPENCODE_ANYCLI_PROMPTLOG"]) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const fs = require("node:fs") as typeof import("node:fs")
+        fs.appendFileSync(
+          process.env["OPENCODE_ANYCLI_PROMPTLOG"],
+          JSON.stringify({ ts: Date.now(), promptArray: options.prompt, flattened: promptText }, null, 2) + "\n---\n",
+        )
+      } catch { /* ignore */ }
+    }
     const modelId = this.modelId
     const command = this.options.command
     const timeoutMs = this.options.timeoutMs

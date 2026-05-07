@@ -33,6 +33,57 @@ import type { TuiPlugin, TuiPluginModule, TuiCommand } from "@opencode-ai/plugin
 const REARM_WINDOW_MS = 5000
 
 const tui: TuiPlugin = async (api) => {
+  // Diagnostic key logger (temporary, gated by env var so production users
+  // never pay the cost). Set OPENCODE_ANYCLI_KEYLOG=/path/to/log and every
+  // raw keypress opentui sees gets appended as JSON. Used to diagnose the
+  // "shift+enter submits instead of inserting newline" report — we need to
+  // know whether opentui's parser sees the shift modifier or just `\r`.
+  if (process.env["OPENCODE_ANYCLI_KEYLOG"]) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require("node:fs") as typeof import("node:fs")
+      const path = process.env["OPENCODE_ANYCLI_KEYLOG"]
+      api.renderer.keyInput.on("keypress", (evt) => {
+        // After the keystroke is delivered, peek at whatever input element
+        // currently has focus and capture its plainText. Lets us see if
+        // textarea actually inserted a newline on Shift+Enter, separate
+        // from how opentui parsed the keystroke. setImmediate so we run
+        // AFTER opentui's textarea handlers have processed the event.
+        setImmediate(() => {
+          let bufferPlainText: string | undefined
+          let bufferKind: string | undefined
+          try {
+            const focused = (api.renderer as unknown as { currentFocusedRenderable?: { plainText?: string; constructor?: { name?: string } } }).currentFocusedRenderable
+            if (focused && typeof focused.plainText === "string") {
+              bufferPlainText = focused.plainText
+              bufferKind = focused.constructor?.name
+            }
+          } catch { /* ignore */ }
+          try {
+            fs.appendFileSync(
+              path,
+              JSON.stringify({
+                ts: Date.now(),
+                name: evt.name,
+                ctrl: evt.ctrl,
+                meta: evt.meta,
+                shift: evt.shift,
+                option: evt.option,
+                source: evt.source,
+                raw: evt.raw,
+                sequence: evt.sequence,
+                eventType: evt.eventType,
+                code: evt.code,
+                bufferPlainText,
+                bufferKind,
+              }) + "\n",
+            )
+          } catch { /* ignore logger errors */ }
+        })
+      })
+    } catch { /* logger setup failed — ignore */ }
+  }
+
   let armed = false
   let armedTimer: ReturnType<typeof setTimeout> | null = null
 
