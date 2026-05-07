@@ -52,6 +52,8 @@ For tiny edits or quick questions, direct cline CLI can still be faster. OpenCod
 git clone https://github.com/JSUYA/opencode-anycli.git
 cd opencode-anycli
 ./install.sh
+# open a new shell or:  source ~/.bashrc   (or ~/.zshrc, etc.)
+opencode-anycli
 ```
 
 `opencode` and `cline` are treated as **bundled runtime dependencies of
@@ -61,40 +63,49 @@ it for you via `npm install -g` (no extra flag required). Conceptually,
 together; the three pieces just happen to ship as separate npm packages
 upstream.
 
+`install.sh` does **not** drop a symlink into `/usr/local/bin` or
+`~/.local/bin` anymore. Instead it appends a managed `export PATH=...`
+block to your shell rc file (`.bashrc`, `.zshrc`, or the fish config),
+pointing at `<repo>/packages/cli/bin/`. The block is bracketed by
+`# >>> opencode-anycli (managed by install.sh) >>>` markers so re-runs
+update it in place rather than duplicating it, and `./uninstall.sh`
+strips the same block out cleanly. Pulling the repo (or `--update`)
+takes effect immediately — no relink step needed.
+
 Optional flags:
 
 | Flag | When to use |
 |---|---|
-| `--user` | Symlink into `~/.local/bin` instead of `/usr/local/bin` |
-| `--sudo` | Use sudo for `/usr/local/bin` symlink AND for the npm install fallback if your prefix needs root |
 | `--skip-build` | Skip the workspace build step (re-install on existing checkout) |
 | `--no-auto-deps` | Air-gap mode: fail if opencode/cline are missing instead of fetching them |
 | `--no-lsp-deps` | Skip auto-install of `typescript-language-server` (otherwise installed so the right-hand LSP panel populates for `.ts`/`.tsx`/`.js` files) |
-
-After installation, run:
-
-```bash
-opencode-anycli
-```
+| `--user` / `--sudo` | DEPRECATED no-ops — kept so existing `opencode-anycli --update --user` invocations don't break. The PATH-based install never needs sudo and never writes outside your home. |
 
 ## Update
 
 ```bash
-opencode-anycli --update                  # git pull --ff-only + idempotent ./install.sh
-opencode-anycli --update --user           # forward extra args to install.sh
-opencode-anycli --update --user --sudo    # multiple args also OK
+opencode-anycli --update                  # auto-stash + git pull + idempotent ./install.sh + stash pop
+opencode-anycli --update --skip-build     # forward extra args to install.sh
 ```
 
-`--update` does two things in order:
+`--update` does the following, in order:
 
-1. `git pull --ff-only` inside the cloned repo (the directory the running
-   binary lives in — auto-discovered by walking up from the symlink target).
-   Aborts cleanly with a clear message if the pull would not be a fast-forward
-   (uncommitted changes / divergent history / no network).
-2. Re-runs `./install.sh` with whatever extra args you passed. The install
-   script is idempotent (mtime-based build skip, byte-equal config skip,
-   symlink-target-equal skip), so a no-op update completes in under a second
-   and produces zero `.bak` files.
+1. `git status --porcelain` — if your working tree has uncommitted
+   changes (tracked or untracked), they are automatically stashed under
+   the message `opencode-anycli auto-stash <ISO ts>` so the fast-forward
+   pull can proceed without complaint.
+2. `git pull --ff-only` inside the cloned repo (the directory the
+   running binary lives in — auto-discovered by walking up from the
+   `opencode-anycli` script). Aborts cleanly with a clear message if
+   the pull would not be a fast-forward.
+3. Re-runs `./install.sh` with whatever extra args you passed. The
+   install script is idempotent (mtime-based build skip, byte-equal
+   config skip, marker-aware PATH-block skip), so a no-op update
+   completes in under a second and produces zero `.bak` files.
+4. `git stash pop` — restores the stashed changes back onto the freshly
+   pulled tree. If pop conflicts, the stash is left at `stash@{0}` and
+   the script tells you exactly which commands to run to recover, so
+   nothing is silently dropped.
 
 ## Interactive Subprocesses & sudo
 

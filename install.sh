@@ -15,6 +15,7 @@ else
 fi
 ok()    { printf "${GREEN}✓${RESET} %s\n" "$*"; }
 info()  { printf "${BLUE}ℹ${RESET} %s\n" "$*"; }
+note()  { printf "  ${DIM}↳ %s${RESET}\n" "$*"; }
 warn()  { printf "${YELLOW}⚠${RESET} %s\n" "$*"; }
 err()   { printf "${RED}✗${RESET} %s\n" "$*" 1>&2; }
 step()  { printf "\n${BLUE}▶${RESET} %s\n" "$*"; }
@@ -35,17 +36,19 @@ for arg in "$@"; do
     --yes|-y) ;;            # accepted for backwards-compat; auto-install is now default
     -h|--help)
       cat <<EOF
-Usage: ./install.sh [--user] [--skip-build] [--sudo] [--no-auto-deps] [--no-lsp-deps]
+Usage: ./install.sh [--skip-build] [--no-auto-deps] [--no-lsp-deps]
 
   opencode-anycli treats opencode + cline as bundled runtime dependencies.
   If either is missing, this installer fetches them via npm by default —
   no extra flag needed. The user-visible install is just:
       git clone … && cd … && ./install.sh
 
-  --user           Symlink into ~/.local/bin instead of /usr/local/bin
+  After build, this script appends a managed PATH-export block to your
+  shell rc file (.bashrc for bash, .zshrc for zsh, config.fish for
+  fish) pointing at <repo>/packages/cli/bin/. Open a new shell or
+  'source' the rc file to use the 'opencode-anycli' command.
+
   --skip-build     Skip the workspace build step (assumes dist/ exists)
-  --sudo           Use sudo when symlinking to /usr/local/bin AND when
-                   auto-installing opencode/cline globally
   --no-auto-deps   Air-gap mode: fail if opencode/cline are missing
                    instead of running 'npm install -g'
   --no-lsp-deps    Skip auto-install of typescript-language-server.
@@ -53,6 +56,10 @@ Usage: ./install.sh [--user] [--skip-build] [--sudo] [--no-auto-deps] [--no-lsp-
                    files until you install it yourself. Other languages'
                    LSPs (gopls, lua-ls, etc.) are unaffected — opencode
                    downloads or installs those on first use.
+  --user           DEPRECATED no-op (kept for backward compat with
+                   `opencode-anycli --update --user`).
+  --sudo           DEPRECATED no-op (was for /usr/local/bin symlink;
+                   the PATH-based install never needs sudo).
 EOF
       exit 0 ;;
     *) err "Unknown arg: $arg"; exit 2 ;;
@@ -289,46 +296,95 @@ else
   ok "tui.json installed: $TUI_TARGET"
 fi
 
-# ─── 7. Symlink the CLI ───────────────────────────────────────────────────────
-step "Linking opencode-anycli binary"
-BIN_SRC="$REPO_DIR/packages/cli/bin/opencode-anycli"
-chmod +x "$BIN_SRC" || true
+# ─── 7. Add the CLI's bin directory to your shell PATH ───────────────────────
+# We deliberately do NOT symlink into /usr/local/bin or ~/.local/bin anymore.
+# Instead we append a managed `export PATH=...` block to the user's shell rc
+# (.bashrc / .zshrc / fish config), pointing at this checkout's bin dir. That
+# means:
+#   - upgrades via `git pull` / --update take effect immediately, no relink.
+#   - moving / deleting the repo cleanly removes the binary from PATH.
+#   - no sudo is ever needed for the link step itself.
+# We use BEGIN/END markers so we can detect and update the block in place
+# when the repo is relocated, without leaving a duplicate behind.
+step "Adding opencode-anycli to your shell PATH"
+BIN_DIR="$REPO_DIR/packages/cli/bin"
+chmod +x "$BIN_DIR/opencode-anycli" || true
 
-# Idempotent symlink helper: skip if the symlink already points where we want.
-ensure_symlink() {
-  # ensure_symlink <target_path> <use_sudo:0|1>
-  local target="$1" use_sudo="$2"
-  if [ -L "$target" ] && [ "$(readlink "$target")" = "$BIN_SRC" ]; then
-    ok "Already linked: $target -> $BIN_SRC"
-    return 0
-  fi
-  if [ "$use_sudo" -eq 1 ]; then
-    sudo ln -sf "$BIN_SRC" "$target"
-    ok "Linked to $target (sudo)"
-  else
-    ln -sf "$BIN_SRC" "$target"
-    ok "Linked to $target"
-  fi
-}
+# --user / --sudo predate the PATH-based install. They used to choose
+# ~/.local/bin vs /usr/local/bin for the symlink target. Both are now
+# meaningless — keep them silently so existing wrappers like
+# `opencode-anycli --update --user` don't break, but warn once.
+if [ "$USER_INSTALL" -eq 1 ] || [ "$USE_SUDO" -eq 1 ]; then
+  note "(--user / --sudo are no-ops with the new PATH-based install; ignoring)"
+fi
 
-if [ "$USER_INSTALL" -eq 1 ]; then
-  TARGET_DIR="$HOME/.local/bin"
-  mkdir -p "$TARGET_DIR"
-  ensure_symlink "$TARGET_DIR/opencode-anycli" 0
-  case ":$PATH:" in
-    *":$TARGET_DIR:"*) : ;;
-    *) warn "$TARGET_DIR is not in PATH. Add this to your shell profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-  esac
-else
-  TARGET_DIR="/usr/local/bin"
-  if [ -w "$TARGET_DIR" ]; then
-    ensure_symlink "$TARGET_DIR/opencode-anycli" 0
-  elif [ "$USE_SUDO" -eq 1 ]; then
-    ensure_symlink "$TARGET_DIR/opencode-anycli" 1
+# Detect the user's interactive shell. SHELL is set by login; fall back to
+# /bin/bash so a missing/empty SHELL still yields a sensible default.
+SHELL_NAME="$(basename "${SHELL:-/bin/bash}")"
+case "$SHELL_NAME" in
+  bash)
+    RC_FILE="$HOME/.bashrc"
+    EXPORT_LINE="export PATH=\"$BIN_DIR:\$PATH\""
+    ;;
+  zsh)
+    RC_FILE="${ZDOTDIR:-$HOME}/.zshrc"
+    EXPORT_LINE="export PATH=\"$BIN_DIR:\$PATH\""
+    ;;
+  fish)
+    RC_FILE="$HOME/.config/fish/config.fish"
+    # fish_add_path is idempotent at runtime AND survives reordering, but
+    # we still wrap it in our managed block so we can remove cleanly.
+    EXPORT_LINE="fish_add_path \"$BIN_DIR\""
+    ;;
+  *)
+    warn "Could not auto-configure PATH for shell '$SHELL_NAME'."
+    note "Add this line to your shell init manually:"
+    note "  export PATH=\"$BIN_DIR:\$PATH\""
+    RC_FILE=""
+    ;;
+esac
+
+if [ -n "$RC_FILE" ]; then
+  MARKER_BEGIN="# >>> opencode-anycli (managed by install.sh) >>>"
+  MARKER_END="# <<< opencode-anycli (managed by install.sh) <<<"
+  mkdir -p "$(dirname "$RC_FILE")"
+  touch "$RC_FILE"
+
+  # Read the current managed block (if any) without invoking grep with a
+  # pattern that contains regex metachars from the marker text.
+  current_block="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+      $0 == b { inside = 1; next }
+      $0 == e { inside = 0; next }
+      inside  { print }
+    ' "$RC_FILE")"
+  expected_block="$EXPORT_LINE"
+
+  if [ "$current_block" = "$expected_block" ]; then
+    ok "PATH entry already in $RC_FILE (no change needed)"
   else
-    warn "$TARGET_DIR is not writable."
-    info "Re-run with ./install.sh --user or ./install.sh --sudo."
-    exit 1
+    if [ -n "$current_block" ]; then
+      # Block exists but content differs — most often the repo was moved.
+      # Strip the old block, then append a fresh one.
+      tmp_rc="$(mktemp)"
+      awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+        $0 == b { inside = 1; next }
+        $0 == e { inside = 0; next }
+        !inside { print }
+      ' "$RC_FILE" > "$tmp_rc"
+      mv "$tmp_rc" "$RC_FILE"
+      info "Replaced existing managed block in $RC_FILE (path changed)"
+    fi
+    # Ensure trailing newline before our block so we don't accidentally
+    # append onto the previous line.
+    if [ -s "$RC_FILE" ] && [ "$(tail -c1 "$RC_FILE" | wc -l)" -eq 0 ]; then
+      printf '\n' >> "$RC_FILE"
+    fi
+    {
+      printf '\n%s\n%s\n%s\n' "$MARKER_BEGIN" "$EXPORT_LINE" "$MARKER_END"
+    } >> "$RC_FILE"
+    ok "Appended PATH entry to $RC_FILE"
+    note "Run 'source $RC_FILE' or open a new shell so 'opencode-anycli'"
+    note "becomes available on PATH."
   fi
 fi
 

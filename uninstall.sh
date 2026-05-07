@@ -94,12 +94,40 @@ remove_symlink() {
   fi
 }
 
-# ─── 1. Locate and remove the opencode-anycli symlink ────────────────────────
+# ─── 1a. Remove the managed PATH block from the user's shell rc files ───────
+# install.sh now appends an `export PATH=…` block bracketed by markers to
+# .bashrc / .zshrc / fish config. Strip it back out here so an uninstall
+# leaves the rc file in its pre-install state. We sweep all three rc
+# locations regardless of $SHELL so users who run multiple shells get a
+# clean removal.
+step "Removing managed PATH block from shell rc files"
+RC_FILES=("$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.config/fish/config.fish")
+MARKER_BEGIN="# >>> opencode-anycli (managed by install.sh) >>>"
+MARKER_END="# <<< opencode-anycli (managed by install.sh) <<<"
+for rc in "${RC_FILES[@]}"; do
+  if [ ! -f "$rc" ]; then continue; fi
+  if ! grep -qF "$MARKER_BEGIN" "$rc"; then
+    info "no managed block in $rc"
+    continue
+  fi
+  tmp_rc="$(mktemp)"
+  awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
+    $0 == b { inside = 1; next }
+    $0 == e { inside = 0; next }
+    !inside { print }
+  ' "$rc" > "$tmp_rc"
+  mv "$tmp_rc" "$rc"
+  ok "removed managed PATH block from $rc"
+done
+
+# ─── 1b. Legacy fallback: remove any pre-1.x symlink in /usr/local/bin or
+#         ~/.local/bin (install.sh used to create one before switching to
+#         PATH-based config). Harmless on fresh installs.
 if [ "$SCOPE" = "none" ]; then
-  step "Skipping opencode-anycli symlink removal (--no-symlink)"
+  step "Skipping legacy opencode-anycli symlink removal (--no-symlink)"
   targets=()
 else
-  step "Removing opencode-anycli CLI symlink"
+  step "Removing legacy opencode-anycli symlink (if any)"
   case "$SCOPE" in
     user)   targets=("$HOME/.local/bin/opencode-anycli") ;;
     system) targets=("/usr/local/bin/opencode-anycli") ;;
