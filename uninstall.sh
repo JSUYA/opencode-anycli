@@ -74,24 +74,52 @@ confirm() {
   case "$reply" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
+# Track anything we couldn't fully remove so the final summary is accurate.
+LEFTOVER_BINS=()
+
 remove_symlink() {
   local link="$1"
-  if [ -L "$link" ]; then
+  if [ -L "$link" ] || [ -f "$link" ]; then
     if [ -w "$(dirname "$link")" ]; then
-      rm "$link"
-      ok "removed symlink $link"
-    elif [ "$USE_SUDO" = "1" ]; then
-      sudo rm "$link"
-      ok "removed symlink $link (sudo)"
-    else
-      warn "no write permission for $(dirname "$link"). Re-run with --sudo."
+      rm -f "$link"
+      ok "removed $link"
+      return 0
+    fi
+    # Need elevated permission. Use sudo if --sudo was passed, --yes was
+    # passed (auto-consent), or the user agrees to a one-line prompt.
+    # Falling back to a plain warning was the previous behaviour and left
+    # root-owned legacy symlinks behind in /usr/local/bin even after
+    # ./uninstall.sh — the most common "복완해도 안 지워진다" case.
+    if ! command -v sudo >/dev/null 2>&1; then
+      warn "$link needs root to remove and sudo is not on PATH; leaving it."
+      LEFTOVER_BINS+=("$link")
       return 1
     fi
-  elif [ -e "$link" ]; then
-    warn "$link exists but is not a symlink — leaving it alone."
-  else
-    info "no symlink at $link (already removed)"
+    local proceed=0
+    if [ "$USE_SUDO" = "1" ] || [ "$YES" = "1" ]; then
+      proceed=1
+    elif confirm "Remove root-owned $link with sudo? (left over from a past --sudo install)"; then
+      proceed=1
+    fi
+    if [ "$proceed" -eq 1 ]; then
+      if sudo rm -f "$link"; then
+        ok "removed $link (sudo)"
+        return 0
+      fi
+      warn "sudo rm $link failed."
+      LEFTOVER_BINS+=("$link")
+      return 1
+    fi
+    warn "$link kept (user declined sudo removal)."
+    LEFTOVER_BINS+=("$link")
+    return 1
   fi
+  if [ -e "$link" ]; then
+    warn "$link exists but is neither a symlink nor a regular file — leaving it alone."
+    LEFTOVER_BINS+=("$link")
+    return 1
+  fi
+  info "nothing at $link (already removed)"
 }
 
 # ─── 1a. Remove the managed PATH block from the user's shell rc files ───────
@@ -120,19 +148,48 @@ for rc in "${RC_FILES[@]}"; do
   ok "removed managed PATH block from $rc"
 done
 
-# ─── 1b. Legacy fallback: remove any pre-1.x symlink in /usr/local/bin or
-#         ~/.local/bin (install.sh used to create one before switching to
-#         PATH-based config). Harmless on fresh installs.
+# ─── 1b. Legacy fallback: remove any pre-PATH-block install artifact
+#         install.sh used to drop a symlink into /usr/local/bin (--sudo /
+#         default-system) or ~/.local/bin (--user). Both are gone in current
+#         install.sh but a previous install may have left one (or several)
+#         behind. Sweep every plausible location plus the npm-global bin
+#         (in case some user did `npm link` from this checkout). Anything
+#         not owned by the current user is escalated to sudo with the
+#         user's consent (or auto if --yes / --sudo).
 if [ "$SCOPE" = "none" ]; then
-  step "Skipping legacy opencode-anycli symlink removal (--no-symlink)"
+  step "Skipping legacy opencode-anycli binary removal (--no-symlink)"
   targets=()
 else
-  step "Removing legacy opencode-anycli symlink (if any)"
+  step "Removing legacy opencode-anycli binaries (if any)"
+  # Build the candidate list. Use an associative-array-equivalent
+  # de-duplication via the seen pattern so we don't try to remove the
+  # same path twice when npm prefix happens to be /usr/local.
+  raw=()
   case "$SCOPE" in
-    user)   targets=("$HOME/.local/bin/opencode-anycli") ;;
-    system) targets=("/usr/local/bin/opencode-anycli") ;;
-    auto)   targets=("/usr/local/bin/opencode-anycli" "$HOME/.local/bin/opencode-anycli") ;;
+    user)   raw=("$HOME/.local/bin/opencode-anycli") ;;
+    system) raw=("/usr/local/bin/opencode-anycli") ;;
+    auto)
+      raw+=("$HOME/.local/bin/opencode-anycli")
+      raw+=("/usr/local/bin/opencode-anycli")
+      raw+=("/usr/bin/opencode-anycli")
+      # npm global bin (only if npm is actually installed). Captures
+      # `npm link` from this repo, which would have created a real
+      # binary there pointing back at packages/cli/bin/opencode-anycli.
+      if command -v npm >/dev/null 2>&1; then
+        npm_bin="$(npm prefix -g 2>/dev/null)/bin/opencode-anycli"
+        raw+=("$npm_bin")
+      fi
+      ;;
   esac
+  # Dedupe — order-preserving.
+  targets=()
+  for cand in "${raw[@]}"; do
+    skip=0
+    for already in "${targets[@]}"; do
+      [ "$already" = "$cand" ] && { skip=1; break; }
+    done
+    [ "$skip" -eq 0 ] && targets+=("$cand")
+  done
 fi
 for t in "${targets[@]}"; do remove_symlink "$t" || true; done
 
@@ -175,9 +232,26 @@ if [ "$PURGE_BUILD" = "1" ]; then
 fi
 
 # ─── 4. Final advice ──────────────────────────────────────────────────────────
-cat <<EOF
+# If any binary couldn't be removed (typically root-owned + user said no to
+# sudo, or sudo missing), shout about it loudly so the user is not left
+# thinking the uninstall finished cleanly when something is still on PATH.
+if [ "${#LEFTOVER_BINS[@]}" -gt 0 ]; then
+  printf "\n${RED}⚠ The following binaries could not be removed:${RESET}\n"
+  for b in "${LEFTOVER_BINS[@]}"; do
+    printf "  - %s\n" "$b"
+  done
+  printf "${DIM}Re-run with --sudo (or remove them manually) to finish the uninstall:${RESET}\n"
+  for b in "${LEFTOVER_BINS[@]}"; do
+    printf "  sudo rm -f %s\n" "$b"
+  done
+fi
 
-${GREEN}Uninstall complete${RESET}
+if [ "${#LEFTOVER_BINS[@]}" -gt 0 ]; then
+  printf "\n${YELLOW}Uninstall finished with leftovers (see above)${RESET}\n"
+else
+  printf "\n${GREEN}Uninstall complete${RESET}\n"
+fi
+cat <<EOF
 
 ${DIM}Left intact:${RESET}
   - opencode and cline binaries
@@ -193,3 +267,7 @@ if [ "$PURGE_BUILD" = "0" ]; then
 fi
 echo
 echo "${DIM}To remove this checkout itself, delete the directory: rm -rf $REPO_DIR${RESET}"
+
+# Exit non-zero if anything was left behind so scripts driving uninstall
+# know it wasn't fully clean.
+[ "${#LEFTOVER_BINS[@]}" -eq 0 ]

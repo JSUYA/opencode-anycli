@@ -51,10 +51,15 @@ For tiny edits or quick questions, direct cline CLI can still be faster. OpenCod
 ```bash
 git clone https://github.com/JSUYA/opencode-anycli.git
 cd opencode-anycli
-./install.sh
-# open a new shell or:  source ~/.bashrc   (or ~/.zshrc, etc.)
+./install.sh && source ~/.bashrc      # bash; for zsh use ~/.zshrc
 opencode-anycli
 ```
+
+The `&& source ~/.bashrc` makes the new PATH live in the current shell
+right away — without it, `opencode-anycli` won't be found until you open
+a new terminal. install.sh prints the exact source command for your
+detected shell at the very end, so you can copy-paste it if you forget
+to chain it.
 
 `opencode` and `cline` are treated as **bundled runtime dependencies of
 OpenCode-AnyCLI** — if either is missing on `PATH`, the installer fetches

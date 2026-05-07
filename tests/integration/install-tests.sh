@@ -39,9 +39,20 @@ run_install_unknown() {
     bash "$INSTALL" --skip-build "$@" 2>&1
 }
 run_uninstall() {
+  # Default helper for rc-block-only tests: skip the symlink sweep so we
+  # never accidentally touch /usr/local/bin/opencode-anycli on the
+  # developer's real machine.
   local home="$1"; shift
   HOME="$home" XDG_CONFIG_HOME="$home/.config" \
     bash "$UNINSTALL" --no-symlink --yes "$@" 2>&1
+}
+run_uninstall_user_scope() {
+  # Helper for tests that DO want symlink removal exercised. Uses
+  # --user so the sweep is confined to the fake $HOME/.local/bin and
+  # never touches the real /usr/local/bin/opencode-anycli.
+  local home="$1"; shift
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    bash "$UNINSTALL" --user --yes "$@" 2>&1
 }
 managed_blocks() {
   # Print the count of managed blocks (BEGIN markers) in the given file.
@@ -235,6 +246,23 @@ assert_contains "T13 --user / --sudo prints deprecation note" "$out" "no-ops wit
 assert_eq "T13 --user --sudo → still 1 block" "$(managed_blocks "$H/.bashrc")" "1"
 rm -rf "$H"
 
+# T13b: apply hint shown on first install (PATH lacks BIN_DIR in test shell)
+H=$(mk_home)
+out=$(run_install "$H")
+assert_contains "T13b first install → 'Apply the new PATH' hint printed" "$out" "Apply the new PATH in this shell"
+assert_contains "T13b first install → exact 'source <rc>' command suggested" "$out" "source $H/.bashrc"
+rm -rf "$H"
+
+# T13c: apply hint NOT shown when current shell ALREADY has BIN_DIR on PATH
+H=$(mk_home)
+# Add BIN_DIR to the test shell's PATH before invoking install — should
+# detect "already loaded" and skip the hint.
+out=$(HOME="$H" XDG_CONFIG_HOME="$H/.config" SHELL=/bin/bash \
+  PATH="$EXP_BIN:$PATH" bash "$INSTALL" --skip-build 2>&1)
+assert_eq "T13c PATH already has BIN_DIR → no apply hint" \
+  "$(printf '%s' "$out" | grep -c 'Apply the new PATH')" "0"
+rm -rf "$H"
+
 
 # ─── Section 6: uninstall.sh — block removal ─────────────────────────────────
 section "uninstall.sh"
@@ -267,6 +295,32 @@ run_install_zsh "$H" >/dev/null
 out=$(run_uninstall "$H")
 assert_eq "T16 .bashrc cleared" "$(managed_blocks "$H/.bashrc")" "0"
 assert_eq "T16 .zshrc cleared" "$(managed_blocks "$H/.zshrc")" "0"
+rm -rf "$H"
+
+# T17a: legacy symlink in user-writable ~/.local/bin → removed without sudo
+H=$(mk_home)
+ln -sf /tmp/fake-target "$H/.local/bin/opencode-anycli"
+out=$(run_uninstall_user_scope "$H")
+assert_eq "T17a legacy symlink in user dir → removed cleanly" \
+  "$([ -L "$H/.local/bin/opencode-anycli" ] && echo present || echo gone)" "gone"
+assert_eq "T17a no leftover banner when removal succeeded" \
+  "$(printf '%s' "$out" | grep -c 'could not be removed')" "0"
+rm -rf "$H"
+
+# T17b: nothing on disk anywhere (--user scope so /usr/local/bin isn't touched)
+H=$(mk_home)
+out=$(run_uninstall_user_scope "$H")
+assert_eq "T17b nothing to remove → no leftover banner" \
+  "$(printf '%s' "$out" | grep -c 'could not be removed')" "0"
+rm -rf "$H"
+
+# T17c: --no-symlink keeps any binary intact (intentional partial uninstall)
+H=$(mk_home)
+ln -sf /tmp/fake-target "$H/.local/bin/opencode-anycli"
+HOME="$H" XDG_CONFIG_HOME="$H/.config" \
+  bash "$UNINSTALL" --no-symlink --yes 2>&1 >/dev/null
+assert_eq "T17c --no-symlink keeps the symlink intact" \
+  "$([ -L "$H/.local/bin/opencode-anycli" ] && echo present || echo gone)" "present"
 rm -rf "$H"
 
 # T17: uninstall with multiple managed blocks (legacy state) → all removed

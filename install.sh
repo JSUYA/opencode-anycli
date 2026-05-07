@@ -344,6 +344,19 @@ case "$SHELL_NAME" in
     ;;
 esac
 
+# SOURCE_CMD: the exact one-liner the user can paste in their CURRENT shell
+# to make `opencode-anycli` available without opening a new terminal. This
+# is what we surface at the very end of the script so it doesn't get lost
+# in the "next steps" block. We also export NEEDS_PATH_RELOAD so the final
+# block knows whether to print the apply hint at all (no point if PATH was
+# already correct from a previous install).
+SOURCE_CMD=""
+NEEDS_PATH_RELOAD=0
+case "$SHELL_NAME" in
+  fish) SOURCE_CMD="source $RC_FILE" ;;
+  *)    SOURCE_CMD="source $RC_FILE" ;;  # bash/zsh syntax matches
+esac
+
 if [ -n "$RC_FILE" ]; then
   MARKER_BEGIN="# >>> opencode-anycli (managed by install.sh) >>>"
   MARKER_END="# <<< opencode-anycli (managed by install.sh) <<<"
@@ -383,12 +396,32 @@ if [ -n "$RC_FILE" ]; then
       printf '\n%s\n%s\n%s\n' "$MARKER_BEGIN" "$EXPORT_LINE" "$MARKER_END"
     } >> "$RC_FILE"
     ok "Appended PATH entry to $RC_FILE"
-    note "Run 'source $RC_FILE' or open a new shell so 'opencode-anycli'"
-    note "becomes available on PATH."
   fi
 fi
 
+# The user only needs to source/relaunch when the CURRENT shell doesn't
+# already have BIN_DIR on PATH. New shells always pick it up from the rc
+# block we just wrote, so this check is purely about helping the existing
+# session. Whether we appended a fresh block or matched an existing one
+# is irrelevant — what matters is what the live PATH looks like RIGHT NOW.
+if [ -n "$RC_FILE" ]; then
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) NEEDS_PATH_RELOAD=0 ;;
+    *)              NEEDS_PATH_RELOAD=1 ;;
+  esac
+fi
+
 # ─── 8. Next steps ────────────────────────────────────────────────────────────
+# We CAN'T modify the parent shell's environment from inside this script
+# (a child process never can). So we surface the exact one-liner to apply
+# the new PATH in the current shell, prominently. New terminals pick it
+# up automatically — the source is only needed for the existing one.
+if [ "$NEEDS_PATH_RELOAD" -eq 1 ] && [ -n "$SOURCE_CMD" ]; then
+  printf "\n${YELLOW}▶ Apply the new PATH in this shell:${RESET}\n"
+  printf "    ${GREEN}%s${RESET}\n" "$SOURCE_CMD"
+  printf "  ${DIM}(or just open a new terminal — both work.)${RESET}\n"
+fi
+
 cat <<EOF
 
 ${GREEN}installation complete / Installation complete${RESET}
