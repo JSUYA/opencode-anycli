@@ -209,6 +209,29 @@ To revert to opencode's default Ctrl+C-exits behaviour: delete
 `~/.config/opencode-anycli/opencode/tui.json` (or remove the
 `display_thinking` keybind override and `plugin: [...]` entry inside it).
 
+## Shift+Enter newline in the prompt
+
+opencode's TUI runs on opentui, which decodes modifier-tagged keys via
+either the kitty keyboard protocol or xterm's `modifyOtherKeys`
+extension. opencode itself only enables the kitty protocol — terminals
+that don't speak kitty (default xterm, alacritty without explicit
+config, older gnome-terminal, some SSH/tmux chains, …) deliver
+**Shift+Enter** as a bare `\r`, indistinguishable from plain Enter, so
+the prompt submits instead of inserting a newline.
+
+OpenCode-AnyCLI's wrapper writes the xterm enable sequence
+`CSI > 4 ; 2 m` to the terminal before launching opencode and pairs it
+with the matching disable on every exit / signal path, so the
+terminal is left in its default state afterwards. Modern xterm-derived
+terminals (xterm, gnome-terminal, konsole, Windows Terminal, Wezterm,
+iTerm2, kitty, ghostty, …) all understand the extension; terminals
+that don't simply ignore the sequence — there is no downside to
+enabling it.
+
+If your terminal supports neither protocol, opencode's `input_newline`
+keybind also covers **Ctrl+J**, **Ctrl+Enter**, and **Alt+Enter** as
+universal alternatives.
+
 ## Auto-approve (Yolo Mode)
 
 opencode itself prompts for approval on file edits, bash commands, web

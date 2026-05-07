@@ -482,14 +482,52 @@ async function main(): Promise<void> {
     ...(args.autoApprove ? { OPENCODE_ANYCLI_AUTO_APPROVE: "1" } : {}),
     ...(args.noTty ? { OPENCODE_ANYCLI_TTY: "0" } : {}),
   }
+  // Enable xterm `modifyOtherKeys` mode 2 BEFORE handing the terminal off
+  // to opencode. Reason: opencode also asks for the kitty keyboard protocol
+  // (per its `useKittyKeyboard: {}` renderer config), but kitty support is
+  // not universal — it works in ghostty / kitty / wezterm / iTerm2-recent,
+  // and is missing or off-by-default in many others (default xterm,
+  // alacritty, certain SSH/tmux chains, older gnome-terminal, …). On those
+  // terminals Shift+Enter, Ctrl+Shift+letter, etc. arrive as bare ASCII
+  // and the textarea cannot tell them apart from plain Enter / letter, so
+  // Shift+Enter ends up firing `input_submit` instead of `input_newline`.
+  // modifyOtherKeys mode 2 (CSI > 4 ; 2 m) fixes that for any terminal
+  // that understands the xterm extension: modified keys come in as
+  // `\x1b[27;mod;code~`, which opentui's parser ALREADY recognises (the
+  // regex is `modifyOtherKeysRe` in @opentui/core). Terminals that don't
+  // know the sequence silently ignore it.
+  //
+  // We pair the enable with a matching disable on every exit / signal so
+  // the user's terminal isn't left in a non-default state after the
+  // session ends.
+  const isStdoutTty = !!process.stdout.isTTY
+  let modifyOtherKeysEnabled = false
+  if (isStdoutTty) {
+    try {
+      process.stdout.write("\x1b[>4;2m")
+      modifyOtherKeysEnabled = true
+    } catch { /* stdout closed somehow — best-effort, fall through */ }
+  }
+  const restoreTerminalKeyboardModes = () => {
+    if (!modifyOtherKeysEnabled) return
+    try { process.stdout.write("\x1b[>4;0m") } catch { /* ignore */ }
+    modifyOtherKeysEnabled = false
+  }
+  process.on("exit", restoreTerminalKeyboardModes)
+  // SIGINT / SIGTERM are handled per-context elsewhere; the `exit` hook
+  // above runs in those paths too, so we don't need a separate restore
+  // call here.
+
   const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
   child.on("close", (code, signal) => {
+    restoreTerminalKeyboardModes()
     if (signal) {
       process.exit(1)
     }
     process.exit(code ?? 0)
   })
   child.on("error", (err) => {
+    restoreTerminalKeyboardModes()
     process.stderr.write(`Failed to spawn opencode: ${err.message}\n`)
     process.exit(1)
   })

@@ -36,10 +36,26 @@ setup_clone() {
   local clone="$root/clone"
   git -C "$REPO" clone --bare "$REPO" "$upstream" >/dev/null 2>&1
   git clone "$upstream" "$clone" >/dev/null 2>&1
-  # Need actual code so install.sh works; copy build artefacts from the real
-  # repo (skip-build will use them).
-  rsync -a --quiet "$REPO/packages/" "$clone/packages/"
-  rsync -a --quiet "$REPO/templates/" "$clone/templates/"
+  # Copy ONLY the gitignored build artefacts (dist + node_modules) from the
+  # developer's working repo, so install.sh --skip-build still finds them.
+  # We deliberately do NOT rsync the entire `packages/` tree — that would
+  # also drag the developer's uncommitted source edits onto the clone's
+  # clean checkout, making `git status --porcelain` non-empty before
+  # `--update` even starts. T18 (clean tree) would then fail spuriously
+  # whenever a developer has WIP. Source files come from `git clone` and
+  # are guaranteed clean.
+  for pkg in "$REPO"/packages/*/; do
+    local pkg_name; pkg_name=$(basename "$pkg")
+    if [ -d "$pkg/dist" ]; then
+      rsync -a --quiet "$pkg/dist/" "$clone/packages/$pkg_name/dist/"
+    fi
+    if [ -d "$pkg/node_modules" ]; then
+      rsync -a --quiet "$pkg/node_modules/" "$clone/packages/$pkg_name/node_modules/"
+    fi
+  done
+  if [ -d "$REPO/node_modules" ]; then
+    rsync -a --quiet "$REPO/node_modules/" "$clone/node_modules/"
+  fi
   echo "$root"
 }
 
