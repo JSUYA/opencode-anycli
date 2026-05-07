@@ -123,9 +123,13 @@ Flags:
   --init                   (Re)create the default config from the bundled template
   --doctor                 Run the diagnostic script and exit
   --update […install.sh args]
-                           git pull --ff-only inside the cloned repo, then
-                           re-run install.sh (idempotent — reuses build
-                           cache and config when unchanged). Anything after
+                           Auto-stash any uncommitted local changes
+                           (tracked + untracked), git pull --ff-only inside
+                           the cloned repo, then re-run install.sh
+                           (idempotent — reuses build cache and config when
+                           unchanged), then 'git stash pop' the local
+                           changes back. If pop conflicts, the stash stays
+                           in stash@{0} so nothing is lost. Anything after
                            --update is forwarded verbatim to install.sh,
                            e.g. 'opencode-anycli --update --user --sudo'.
   --allow-dangerously-skip-permissions
@@ -192,21 +196,66 @@ function runUpdate(installArgs: string[]): never {
   }
   const repoDir = dirname(installScript)
 
+  // Stash any uncommitted local changes (tracked + untracked) so a
+  // fast-forward pull doesn't fail. We restore them with `git stash pop`
+  // after install.sh runs. If the pop conflicts (e.g. the user's local
+  // edits collide with the freshly-pulled code) we leave the stash
+  // intact and surface a clear hint instead of silently dropping it.
+  const status = spawnSync("git", ["-C", repoDir, "status", "--porcelain"], { stdio: ["ignore", "pipe", "pipe"] })
+  const hasChanges = status.status === 0 && status.stdout.length > 0
+  let stashed = false
+  if (hasChanges) {
+    const stashMsg = `opencode-anycli auto-stash ${new Date().toISOString()}`
+    process.stderr.write(`opencode-anycli: stashing local changes — "${stashMsg}"\n`)
+    const stash = spawnSync(
+      "git",
+      ["-C", repoDir, "stash", "push", "--include-untracked", "-m", stashMsg],
+      { stdio: "inherit" },
+    )
+    if (stash.status !== 0) {
+      process.stderr.write(
+        `git stash failed (exit ${stash.status ?? "?"}). Aborting --update so we don't lose local edits.\n`,
+      )
+      process.exit(stash.status ?? 1)
+    }
+    stashed = true
+  }
+
+  const popStashAndExit = (code: number): never => {
+    if (stashed) {
+      process.stderr.write("opencode-anycli: restoring stashed local changes — git stash pop\n")
+      const pop = spawnSync("git", ["-C", repoDir, "stash", "pop"], { stdio: "inherit" })
+      if (pop.status !== 0) {
+        process.stderr.write(
+          "opencode-anycli: 'git stash pop' had conflicts or failed.\n" +
+            "  Your changes are still safe in stash@{0}.\n" +
+            "  Run 'git -C " +
+            repoDir +
+            " stash list' to see them, then 'git stash pop' (or 'git stash apply') when ready.\n",
+        )
+      }
+    }
+    process.exit(code)
+  }
+
   process.stderr.write(`opencode-anycli: pulling latest in ${repoDir}\n`)
   const pull = spawnSync("git", ["-C", repoDir, "pull", "--ff-only"], { stdio: "inherit" })
   if (pull.status !== 0) {
     process.stderr.write(
-      `git pull failed (exit ${pull.status ?? "?"}). Resolve the issue and re-run --update.\n` +
-        "Common causes: uncommitted local changes, divergent history, network unreachable.\n",
+      `git pull failed (exit ${pull.status ?? "?"}). ` +
+        "Common causes: divergent history (need rebase/merge), network unreachable.\n",
     )
-    process.exit(pull.status ?? 1)
+    popStashAndExit(pull.status ?? 1)
   }
 
   process.stderr.write(
     `opencode-anycli: re-running install.sh ${installArgs.length > 0 ? installArgs.join(" ") : "(no extra args)"}\n`,
   )
   const install = spawnSync("bash", [installScript, ...installArgs], { stdio: "inherit", cwd: repoDir })
-  process.exit(install.status ?? 1)
+  popStashAndExit(install.status ?? 1)
+  // TS can't always carry the `never` return of the inner arrow function
+  // back up to the enclosing scope, so make the unreachable explicit.
+  throw new Error("unreachable: popStashAndExit returned without exiting")
 }
 
 /**
