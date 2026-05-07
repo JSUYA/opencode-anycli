@@ -209,28 +209,58 @@ To revert to opencode's default Ctrl+C-exits behaviour: delete
 `~/.config/opencode-anycli/opencode/tui.json` (or remove the
 `display_thinking` keybind override and `plugin: [...]` entry inside it).
 
-## Shift+Enter newline in the prompt
+## Multi-line prompt — Enter inserts a newline, Alt+Enter submits
 
-opencode's TUI runs on opentui, which decodes modifier-tagged keys via
-either the kitty keyboard protocol or xterm's `modifyOtherKeys`
-extension. opencode itself only enables the kitty protocol — terminals
-that don't speak kitty (default xterm, alacritty without explicit
-config, older gnome-terminal, some SSH/tmux chains, …) deliver
-**Shift+Enter** as a bare `\r`, indistinguishable from plain Enter, so
-the prompt submits instead of inserting a newline.
+opencode's upstream default is the messenger pattern (Enter submits,
+Shift+Enter inserts a newline). That relies on the terminal reporting
+the **Shift** modifier on Return — which only works when both:
+(a) the terminal speaks either the kitty keyboard protocol or xterm's
+`modifyOtherKeys` extension, and (b) it actually reports modifiers on
+the Return key (some implement modifyOtherKeys but exclude Return for
+backward compatibility). On terminals that fail either bar — default
+xterm-256color in many environments, basic SSH chains, embedded
+IDE terminals, older gnome-terminal, etc. — Shift+Enter arrives at
+opencode as bare `\r`, indistinguishable from plain Enter. The prompt
+then submits when the user expected a newline.
 
-OpenCode-AnyCLI's wrapper writes the xterm enable sequence
-`CSI > 4 ; 2 m` to the terminal before launching opencode and pairs it
-with the matching disable on every exit / signal path, so the
-terminal is left in its default state afterwards. Modern xterm-derived
-terminals (xterm, gnome-terminal, konsole, Windows Terminal, Wezterm,
-iTerm2, kitty, ghostty, …) all understand the extension; terminals
-that don't simply ignore the sequence — there is no downside to
-enabling it.
+OpenCode-AnyCLI ships a `tui.json` that swaps the two:
 
-If your terminal supports neither protocol, opencode's `input_newline`
-keybind also covers **Ctrl+J**, **Ctrl+Enter**, and **Alt+Enter** as
-universal alternatives.
+```jsonc
+// templates/tui.json (installed at ~/.config/opencode-anycli/opencode/tui.json)
+{
+  "keybinds": {
+    "input_submit": "alt+return",
+    "input_newline": "return,shift+return,ctrl+return,ctrl+j"
+  }
+}
+```
+
+Result:
+
+| Key | Action |
+|---|---|
+| **Enter** | Insert newline |
+| **Alt+Enter** (Option+Enter on macOS) | Submit prompt |
+| Shift+Enter | Newline (if terminal reports modifier; falls through to plain Enter otherwise → still newline) |
+| Ctrl+Enter | Newline (if terminal reports modifier) |
+| Ctrl+J | Newline (terminal-independent — `\n` byte) |
+
+Why this is safe regardless of terminal capability: every supported
+"newline" key collapses down to plain Enter on a terminal that strips
+modifiers, and plain Enter is also `input_newline`. So you can't
+accidentally submit by pressing the wrong combination — submit
+requires the explicit `\x1b\r` sequence that Alt+Enter sends, which
+every common terminal forwards correctly.
+
+UX trade-off: this is the "Cursor / VS Code chat / WhatsApp Web"
+pattern, not the "Slack / Discord" pattern. If you prefer
+upstream's default (Enter submits) and your terminal does report
+Shift+Enter, edit `~/.config/opencode-anycli/opencode/tui.json`
+and change the two keybinds back to opencode's defaults
+(`"input_submit": "return"`, `"input_newline": "shift+return,ctrl+return,alt+return,ctrl+j"`).
+The wrapper still enables `modifyOtherKeys` mode 2 at startup either
+way, so terminals that DO support it will pick up the modifier on
+Shift+Enter regardless of which preset you use.
 
 ## Auto-approve (Yolo Mode)
 
