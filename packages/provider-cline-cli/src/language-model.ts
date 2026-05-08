@@ -18,8 +18,9 @@ import type {
   LanguageModelV3StreamPart,
 } from "@ai-sdk/provider"
 import { runOnce, runStream } from "./cline-runner.js"
+import { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
 import { flattenPrompt } from "./prompt-flatten.js"
-import type { ClineProviderOptions, ClineUsage } from "./types.js"
+import type { ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
 
 const DEFAULT_TIMEOUT_MS = 600_000
 
@@ -30,7 +31,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
   readonly supportedUrls: Record<string, RegExp[]> = {}
 
   private readonly options: {
-    mode: "subprocess" | "passthrough"
+    mode: ClineMode
     command: string
     timeoutMs: number
     extraArgs: readonly string[] | undefined
@@ -60,7 +61,8 @@ export class ClineLanguageModel implements LanguageModelV3 {
     }
 
     const promptText = flattenPrompt({ prompt: options.prompt as ReadonlyArray<unknown> })
-    const result = await runOnce({
+    const runner = this.options.mode === "acp" ? runOnceAcp : runOnce
+    const result = await runner({
       prompt: promptText,
       options: {
         command: this.options.command,
@@ -119,6 +121,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
     const extraArgs = this.options.extraArgs
     const cwd = this.options.cwd
     const env = this.options.env
+    const streamFn = this.options.mode === "acp" ? runStreamAcp : runStream
     const responseId = cryptoRandomId()
 
     const stream = new ReadableStream<LanguageModelV3StreamPart>({
@@ -161,7 +164,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
         let parseErrors = 0
         let emittedToolCall = false
         try {
-          for await (const ev of runStream({
+          for await (const ev of streamFn({
             prompt: promptText,
             options: { command, timeoutMs, extraArgs, cwd, env },
             signal: options.abortSignal,

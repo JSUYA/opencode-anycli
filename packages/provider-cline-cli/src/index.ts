@@ -12,6 +12,8 @@ export { ClineLanguageModel } from "./language-model.js"
 export type { ClineProviderOptions, ClineMode, ClineEvent, RunResult } from "./types.js"
 export { readGlobalState, defaultClineConfigPaths } from "./config-reader.js"
 export type { ClineGlobalState, ClineConfigPaths } from "./config-reader.js"
+export { runOnce, runStream } from "./cline-runner.js"
+export { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
 
 import { createCline } from "./provider.js"
 export default createCline

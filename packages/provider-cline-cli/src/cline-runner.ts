@@ -22,6 +22,12 @@ import {
   isTaskStarted,
   pickText,
 } from "./ndjson-parser.js"
+import {
+  buildPromptFileWrapper,
+  deletePromptTempFile,
+  shouldUsePromptFile,
+  writePromptTempFile,
+} from "./prompt-tempfile.js"
 import type { ClineEvent, ClineUsage, RunResult } from "./types.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
@@ -168,7 +174,27 @@ export function runStream(input: RunInput): AsyncIterable<StreamEvent> {
 async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, void, void> {
   const { prompt, options, signal } = input
   const spawnImpl = input.spawnFn ?? spawn
-  const args = buildClineArgs(prompt, options.extraArgs)
+
+  // E2BIG avoidance: prompts larger than argvSafeLimitBytes() are spilled to
+  // a temp file; cline reads it via its readFile tool. Works on every cline
+  // version because we still go through the standard --act path with a small
+  // wrapper text in argv. See prompt-tempfile.ts for the rationale.
+  let tempPromptFile: string | null = null
+  let effectivePrompt = prompt
+  if (shouldUsePromptFile(prompt)) {
+    try {
+      tempPromptFile = await writePromptTempFile(prompt)
+      effectivePrompt = buildPromptFileWrapper(tempPromptFile)
+      if (DEBUG)
+        process.stderr.write(
+          `[cline-runner] prompt spilled to ${tempPromptFile} (${Buffer.byteLength(prompt, "utf8")} bytes)\n`,
+        )
+    } catch (err) {
+      yield { type: "error", error: wrapErr(err, "Failed to write prompt temp file") }
+      return
+    }
+  }
+  const args = buildClineArgs(effectivePrompt, options.extraArgs)
 
   const env = {
     ...process.env,
@@ -190,6 +216,14 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   const wantTty = ttyEnv !== "0" // default ON
   const stdin: "ignore" | "inherit" = wantTty ? "inherit" : "ignore"
 
+  const cleanupTempPromptFile = () => {
+    if (tempPromptFile !== null) {
+      const path = tempPromptFile
+      tempPromptFile = null
+      void deletePromptTempFile(path)
+    }
+  }
+
   let child: ChildProcessWithoutNullStreams
   try {
     child = spawnImpl(options.command, args, {
@@ -198,6 +232,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       stdio: [stdin, "pipe", "pipe"],
     }) as unknown as ChildProcessWithoutNullStreams
   } catch (err) {
+    cleanupTempPromptFile()
     yield { type: "error", error: wrapErr(err, `Failed to spawn cline (${options.command})`) }
     return
   }
@@ -314,6 +349,12 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     const readCall = pickReadFileCall(ev)
     if (readCall !== null) {
       if (isPartial(ev)) return
+      // Suppress reads of our own spill file — it's an implementation detail
+      // (we wrote it and pointed cline at it; the user never asked for it).
+      // Without this filter the path leaks into runOnce's text and shows up
+      // as a phantom "Read /tmp/opencode-anycli-prompts/..." entry in the
+      // session timeline.
+      if (tempPromptFile !== null && readCall.filePath === tempPromptFile) return
       if (emittedReads.has(readCall.filePath)) return
       emittedReads.add(readCall.filePath)
       const toolCallId = `cline-read-${randomUUID()}`
@@ -351,6 +392,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
 
   child.on("error", (err) => {
     exitErr = wrapErr(err, "cline subprocess error")
+    cleanupTempPromptFile()
     done = true
     if (resolveNext) {
       const r = resolveNext
@@ -362,6 +404,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   child.on("close", (code, sigterm) => {
     clearTimeout(timeoutHandle)
     signal?.removeEventListener("abort", onAbort)
+    cleanupTempPromptFile()
     // Flush any trailing line.
     for (const line of splitter.flush()) {
       const ev = parseLine(line)

@@ -1,13 +1,29 @@
 // Shared types for @opencode-anycli/provider-cline-cli.
 
-export type ClineMode = "subprocess" | "passthrough"
+/**
+ * How this provider invokes cline.
+ *
+ *  - "subprocess" (default) — `cline --json --yolo --act <prompt>`.
+ *    Normally the prompt rides on argv, but Linux caps each arg at
+ *    MAX_ARG_STRLEN = 32*PAGE_SIZE (128 KiB on 4 KiB pages) which long
+ *    sessions used to trip with E2BIG. We now spill oversize prompts to a
+ *    temp file and pass cline a short wrapper instructing it to readFile
+ *    that path — the runner handles this automatically (see
+ *    prompt-tempfile.ts), so any cline version is effectively unlimited.
+ *
+ *  - "acp" (opt-in) — `cline --acp` + Agent Client Protocol over stdio
+ *    JSON-RPC. The prompt travels in the message body, no argv hop, no
+ *    temp file. Use when you want the richer protocol surface (structured
+ *    tool_call updates, plan / mode events, multi-turn sessions) — long
+ *    prompts alone do NOT require this mode anymore.
+ *
+ *  - "passthrough" (planned) — bypass cline entirely and call the model
+ *    directly using cline's stored credentials. NOT YET IMPLEMENTED.
+ */
+export type ClineMode = "subprocess" | "acp" | "passthrough"
 
 export interface ClineProviderOptions {
-  /**
-   * Which strategy the provider uses to call the LLM.
-   * - "subprocess" (default): spawn the cline CLI and parse its NDJSON stream.
-   * - "passthrough": read cline's config and call the underlying LLM directly. NOT YET IMPLEMENTED.
-   */
+  /** See {@link ClineMode}. Default: "subprocess". */
   mode?: ClineMode
   /** Path to the cline binary. Defaults to "cline" (resolved via PATH). */
   command?: string

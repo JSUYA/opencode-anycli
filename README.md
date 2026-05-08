@@ -342,8 +342,36 @@ The adapter implements the Vercel AI SDK v3 `LanguageModelV3` interface expected
 
 ## Modes
 
-- `subprocess`: implemented. Uses cline as a subprocess and preserves cline tool behavior.
-- `passthrough`: planned. Would read cline settings and call the model directly from opencode.
+- `subprocess` (default): spawns `cline --json --yolo --act <prompt>`. Simple
+  and proven, but the prompt is a single positional argument so the kernel
+  argv limit (`ARG_MAX` — typically 256 KiB on macOS, 4 MiB on Linux) caps
+  how much conversation can be passed. Long sessions or large pasted file
+  context eventually trip `Failed to spawn cline: spawn E2BIG`.
+- `acp` (opt-in): spawns `cline --acp` and speaks the
+  [Agent Client Protocol](https://agentclientprotocol.com) over stdio JSON-RPC.
+  The prompt travels in the message body, not argv, so `ARG_MAX` does not
+  apply — long inputs are bounded only by cline's internal limits and
+  available memory. Recommended whenever you hit `E2BIG` or expect
+  conversation history to grow large.
+- `passthrough` (planned): would read cline settings and call the model
+  directly from opencode. Not yet implemented.
+
+To opt into ACP mode, set `mode: "acp"` on the cline provider in
+`~/.config/opencode-anycli/opencode/opencode.json`:
+
+```json
+{
+  "provider": {
+    "cline": {
+      "options": { "mode": "acp" }
+    }
+  }
+}
+```
+
+ACP requires cline ≥ 2.18 (which ships `--acp`). Verified against
+prompts up to ~2 MiB; above that cline's internal model context window
+becomes the limiting factor, not the transport.
 
 ## Diagnostics & recovery
 

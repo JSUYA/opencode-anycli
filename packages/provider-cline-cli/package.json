@@ -2,7 +2,13 @@
   "name": "@opencode-anycli/provider-cline-cli",
   "version": "0.1.0",
   "description": "Vercel AI SDK v3 LanguageModelV3 adapter that delegates to a locally installed cline CLI subprocess.",
-  "keywords": ["ai-sdk", "ai-sdk-provider", "cline", "opencode", "language-model-v3"],
+  "keywords": [
+    "ai-sdk",
+    "ai-sdk-provider",
+    "cline",
+    "opencode",
+    "language-model-v3"
+  ],
   "license": "MIT",
   "author": "Project Maintainers",
   "repository": {
@@ -33,6 +39,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.13.1",
     "@ai-sdk/provider": "^3.0.8"
   },
   "devDependencies": {
