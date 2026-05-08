@@ -19,6 +19,7 @@
   },
   "model": "cline/default",
   "small_model": "cline/default",
+  "default_agent": "orchestrator",
   "agent": {
     "build":      { "model": "cline/default" },
     "plan":       { "model": "cline/default" },
