@@ -235,7 +235,7 @@ To revert to opencode's default Ctrl+C-exits behaviour: delete
 `~/.config/opencode-anycli/opencode/tui.json` (or remove the
 `display_thinking` keybind override and `plugin: [...]` entry inside it).
 
-## Multi-line prompt — Enter inserts a newline, Alt+Enter submits
+## Multi-line prompt — Enter inserts a newline, Alt+Enter / Ctrl+Enter / Ctrl+J submit
 
 opencode's upstream default is the messenger pattern (Enter submits,
 Shift+Enter inserts a newline). That relies on the terminal reporting
@@ -249,41 +249,52 @@ IDE terminals, older gnome-terminal, etc. — Shift+Enter arrives at
 opencode as bare `\r`, indistinguishable from plain Enter. The prompt
 then submits when the user expected a newline.
 
-OpenCode-AnyCLI ships a `tui.json` that swaps the two:
+OpenCode-AnyCLI ships a `tui.json` that flips the model: plain Enter
+always inserts a newline, and three different keys can submit so at
+least one works in any terminal / window manager.
 
 ```jsonc
 // templates/tui.json (installed at ~/.config/opencode-anycli/opencode/tui.json)
 {
   "keybinds": {
-    "input_submit": "alt+return",
-    "input_newline": "return,shift+return,ctrl+return,ctrl+j"
+    "prompt_submit": "alt+return,ctrl+return,ctrl+j",
+    "input_submit":  "alt+return,ctrl+return,ctrl+j",
+    "input_newline": "return,shift+return"
   }
 }
 ```
 
+Why both `prompt_submit` and `input_submit`: opencode 1.14+ split
+submit handling into two keybinds — `prompt_submit` is the main
+LLM-prompt textarea, `input_submit` is dialogs / search / other input
+fields. Overriding only one leaves the other on its default (Enter
+submits), which is what you'll see after upgrading an older config.
+
 Result:
 
-| Key | Action |
-|---|---|
-| **Enter** | Insert newline |
-| **Alt+Enter** (Option+Enter on macOS) | Submit prompt |
-| Shift+Enter | Newline (if terminal reports modifier; falls through to plain Enter otherwise → still newline) |
-| Ctrl+Enter | Newline (if terminal reports modifier) |
-| Ctrl+J | Newline (terminal-independent — `\n` byte) |
+| Key | Action | Works in |
+|---|---|---|
+| **Enter** | Insert newline | every terminal — bare `\r` isn't bound to any submit keybind, so the textarea inserts a newline by default |
+| **Alt+Enter** (Option+Enter on macOS) | Submit prompt | every common terminal that doesn't intercept Alt+Return — sends `\x1b\r`, an emacs-era universal Meta-prefix sequence. Window managers like Enlightenment's Terminology or GNOME's "use Alt to access menus" can swallow it; in that case use Ctrl+J |
+| **Ctrl+Enter** | Submit prompt | terminals that report the Ctrl modifier on Return: ghostty, kitty, WezTerm, recent alacritty, foot, iTerm2 (Settings → Profiles → Keys → "Report modifiers using CSI u"). On other terminals Ctrl+Enter arrives as bare `\r` and falls through to newline |
+| **Ctrl+J** | Submit prompt | **every terminal, every WM** — sends `\n` (ASCII LF, 0x0A), a pure ASCII byte no terminal or window manager intercepts. The universal fallback when Alt+Enter is blocked and the terminal doesn't speak kitty / modifyOtherKeys |
+| Shift+Enter | Newline (when terminal reports the modifier; otherwise falls through to plain Enter → still newline) | all terminals (graceful degradation) |
 
 Why this is safe regardless of terminal capability: every supported
-"newline" key collapses down to plain Enter on a terminal that strips
-modifiers, and plain Enter is also `input_newline`. So you can't
-accidentally submit by pressing the wrong combination — submit
-requires the explicit `\x1b\r` sequence that Alt+Enter sends, which
-every common terminal forwards correctly.
+"submit" key either reaches opencode as a unique sequence (`\x1b\r`,
+`\n`, `\x1b[13;5u`) that matches one of the submit keybinds, or
+collapses to bare `\r` on a terminal that strips the modifier — and
+bare `\r` is not bound to submit, so it inserts a newline. You can't
+accidentally submit by pressing the wrong combination; you can only
+fail to submit and get a newline, which the textarea handles fine.
 
 UX trade-off: this is the "Cursor / VS Code chat / WhatsApp Web"
-pattern, not the "Slack / Discord" pattern. If you prefer
-upstream's default (Enter submits) and your terminal does report
-Shift+Enter, edit `~/.config/opencode-anycli/opencode/tui.json`
-and change the two keybinds back to opencode's defaults
-(`"input_submit": "return"`, `"input_newline": "shift+return,ctrl+return,alt+return,ctrl+j"`).
+pattern, not the "Slack / Discord" pattern. If you prefer upstream's
+default (Enter submits) and your terminal does report Shift+Enter,
+edit `~/.config/opencode-anycli/opencode/tui.json` and change the
+keybinds back to opencode's defaults
+(`"prompt_submit": "return"`, `"input_submit": "return"`,
+`"input_newline": "shift+return,ctrl+return,alt+return,ctrl+j"`).
 The wrapper still enables `modifyOtherKeys` mode 2 at startup either
 way, so terminals that DO support it will pick up the modifier on
 Shift+Enter regardless of which preset you use.

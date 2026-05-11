@@ -4,8 +4,9 @@
     "app_exit": "ctrl+d,<leader>q",
     "username_toggle": "ctrl+c",
 
-    "input_submit": "alt+return",
-    "input_newline": "return,shift+return,ctrl+return,ctrl+j"
+    "prompt_submit": "alt+return,ctrl+return,ctrl+j",
+    "input_submit":  "alt+return,ctrl+return,ctrl+j",
+    "input_newline": "return,shift+return"
   },
   "plugin": ["file://__OPENCODE_ANYCLI_EXIT_CONFIRM_DIR__"]
 }
