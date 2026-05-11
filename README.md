@@ -220,20 +220,25 @@ plugin works by:
 
 1. Rebinding opencode's `app_exit` keybind to drop `ctrl+c` so the
    built-in exit-on-Ctrl+C handlers stop firing.
-2. Routing `ctrl+c` through opencode's otherwise-unused
-   `display_thinking` keybind (no opencode component checks it via direct
-   `keybind.match()` — only the global command dispatcher does).
-3. Registering a single hidden TuiCommand on that keybind whose
-   `onSelect` opens an `api.ui.DialogConfirm`. The dispatcher prepends
-   plugin registrations and returns after the first match, so opencode's
-   built-in `display_thinking` toggle does not also fire.
-4. On confirm, calling `api.command.trigger("app.exit")` to reuse the
+2. Attaching a global handler to opentui's renderer-level `keyInput`
+   emitter that fires before any component-level handler. When it sees
+   `ctrl+c` (without other modifiers) it opens the dialog and calls
+   `evt.preventDefault()` to stop propagation, so opencode's session /
+   prompt routes never see the event.
+3. On confirm, calling `api.command?.trigger("app.exit")` to reuse the
    exact shutdown path opencode uses for its own exit (renderer
    teardown, terminal-title reset, etc.).
 
+(Earlier versions of this plugin hooked into the unused
+`username_toggle` keybind name. opencode 1.14 dropped that name and
+made the `tui.json` schema strict — `additionalProperties: false` —
+so any stale reference silently invalidated the whole file and dropped
+every keybind override with it. The raw-keypress approach above is
+schema-independent and survives future keybind renames.)
+
 To revert to opencode's default Ctrl+C-exits behaviour: delete
 `~/.config/opencode-anycli/opencode/tui.json` (or remove the
-`display_thinking` keybind override and `plugin: [...]` entry inside it).
+`plugin: [...]` entry inside it).
 
 ## Multi-line prompt — Enter inserts a newline, Alt+Enter / Ctrl+Enter / Ctrl+J submit
 

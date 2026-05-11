@@ -5,20 +5,18 @@
 //   1. opencode-anycli's tui.json removes `ctrl+c` from the `app_exit`
 //      keybind so the component-level `keybind.match("app_exit", evt)`
 //      checks in opencode's session/prompt routes stop firing on Ctrl+C.
-//      It then rebinds the unused `username_toggle` keybind to `ctrl+c`
-//      and registers our command on that name. `username_toggle` was
-//      verified by full-tree grep to be defined ONLY in the keybind
-//      schema — no opencode component, dialog, or built-in command
-//      references it via `keybind.match()` or `keybind: "..."`. That
-//      makes it the only keybind name with no upstream owner, so the
-//      plugin command we attach to it is the sole handler.
-//   2. The first attempt used `display_thinking`, but session routes
-//      register an internal `session.toggle.thinking` command on that
-//      keybind AFTER plugin load (route mounts when the user opens a
-//      session) — and the command dispatcher prepends each
-//      registration, so the route's command ends up first in the
-//      iteration order and shadows the plugin handler. `username_toggle`
-//      has no upstream registration to lose to.
+//   2. The plugin attaches a global handler to opentui's renderer-level
+//      `keyInput` emitter. Per @opentui/core's KeyHandler design, global
+//      handlers run BEFORE renderable (component) handlers and can call
+//      `evt.preventDefault()` to stop the event from propagating any
+//      further — which means we don't need to piggyback on a keybind
+//      name at all. Earlier versions of this plugin re-used the unused
+//      `username_toggle` keybind, but opencode 1.14 dropped that name
+//      and made the tui.json schema strict (`additionalProperties:
+//      false`), so any reference to it now invalidates the whole file
+//      and silently drops every keybind override with it. Intercepting
+//      ctrl+c at the raw KeyEvent layer is schema-independent and
+//      survives future opencode keybind renames.
 //   3. On press we replace the dialog stack with a `DialogConfirm`. Y
 //      confirms exit → triggers the built-in `app.exit` command (so the
 //      shutdown path is exactly opencode's, not ours). N / Escape closes
@@ -28,7 +26,7 @@
 // JSX.Element directly and the dialog stack accepts a `() => JSX.Element`
 // factory, so a tsx pipeline isn't needed in the plugin build.
 
-import type { TuiPlugin, TuiPluginModule, TuiCommand } from "@opencode-ai/plugin/tui"
+import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 
 const REARM_WINDOW_MS = 5000
 
@@ -148,19 +146,18 @@ const tui: TuiPlugin = async (api) => {
     }, REARM_WINDOW_MS)
   }
 
-  api.command?.register((): TuiCommand[] => [
-    {
-      title: "Exit opencode-anycli (with confirmation)",
-      value: "opencode-anycli.exit-confirm",
-      // See header for keybind selection rationale; in short:
-      // username_toggle is defined in the schema but referenced nowhere
-      // else in opencode's TUI source, so our handler is unopposed.
-      keybind: "username_toggle",
-      hidden: true,
-      category: "System",
-      onSelect: () => onCtrlC(),
-    },
-  ])
+  // Global keypress interceptor. opentui dispatches keypress events to
+  // renderer-level listeners (this one) BEFORE handing them to renderable
+  // component-level handlers, and `evt.preventDefault()` aborts further
+  // propagation — so opencode's session/prompt-route handlers never see
+  // this ctrl+c. We test for `ctrl && name === "c"` with no other modifier
+  // so that ctrl+shift+c (copy on most terminals) still goes through.
+  api.renderer.keyInput.on("keypress", (evt) => {
+    if (evt.ctrl && evt.name === "c" && !evt.shift && !evt.meta && !evt.option) {
+      onCtrlC()
+      evt.preventDefault()
+    }
+  })
 
   api.lifecycle.onDispose(() => {
     if (armedTimer) clearTimeout(armedTimer)
