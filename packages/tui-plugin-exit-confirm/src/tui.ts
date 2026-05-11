@@ -31,6 +31,22 @@ import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
 const REARM_WINDOW_MS = 5000
 
 const tui: TuiPlugin = async (api) => {
+  // Plugin-load diagnostic. Gated by env var so production users pay
+  // nothing. Useful when ctrl+c dialog mysteriously doesn't appear in
+  // some environment: if this line never lands in the log file, the
+  // plugin itself isn't being loaded by opencode (tui.json schema
+  // rejection, wrong file:// URL, missing dist, etc.).
+  if (process.env["OPENCODE_ANYCLI_EXIT_CONFIRM_DEBUG"]) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require("node:fs") as typeof import("node:fs")
+      fs.appendFileSync(
+        process.env["OPENCODE_ANYCLI_EXIT_CONFIRM_DEBUG"],
+        `[${new Date().toISOString()}] exit-confirm plugin loaded\n`,
+      )
+    } catch { /* ignore */ }
+  }
+
   // Diagnostic key logger (temporary, gated by env var so production users
   // never pay the cost). Set OPENCODE_ANYCLI_KEYLOG=/path/to/log and every
   // raw keypress opentui sees gets appended as JSON. Used to diagnose the
@@ -154,6 +170,16 @@ const tui: TuiPlugin = async (api) => {
   // so that ctrl+shift+c (copy on most terminals) still goes through.
   api.renderer.keyInput.on("keypress", (evt) => {
     if (evt.ctrl && evt.name === "c" && !evt.shift && !evt.meta && !evt.option) {
+      if (process.env["OPENCODE_ANYCLI_EXIT_CONFIRM_DEBUG"]) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const fs = require("node:fs") as typeof import("node:fs")
+          fs.appendFileSync(
+            process.env["OPENCODE_ANYCLI_EXIT_CONFIRM_DEBUG"],
+            `[${new Date().toISOString()}] ctrl+c intercepted (armed=${armed})\n`,
+          )
+        } catch { /* ignore */ }
+      }
       onCtrlC()
       evt.preventDefault()
     }
