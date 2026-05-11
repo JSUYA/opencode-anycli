@@ -82,6 +82,30 @@ ask_yes() {
 }
 
 # ─── Helper: install a global npm package (opencode-ai / cline) ───────────────
+# Why this is so defensive: two npm-global failure modes silently corrupted
+# previous installs.
+#
+#   1. `npm install -g X 2>&1 | tee LOG` returns tee's exit status, not
+#      npm's, so a failing npm install slipped through every check and the
+#      function reported "X installed: <old version>" because the existing
+#      stale binary was still on PATH. Detected on Ubuntu 22.04 where
+#      opencode 1.14.41 → 1.14.48 silently no-op'd. We now use
+#      ${PIPESTATUS[0]} to read npm's exit code through the pipe.
+#
+#   2. npm's "atomic rename" install strategy (move new-version to a temp
+#      sibling, rename old to .pkg-XXX, rename new into place) leaves the
+#      install half-done when any rename trips ENOTEMPTY — typically
+#      because a previous interrupted run left .pkg-XXX shadow dirs
+#      behind, or because a file watcher (VS Code, opencode itself) had
+#      open handles on the old version. The repair is mechanical: rm -rf
+#      the package dir + every .pkg-XXX sibling under the global
+#      lib/node_modules, then retry once. We only do this for the
+#      no-sudo path; root-owned trees keep escalating to sudo.
+#
+# We also use `<pkg>@latest` for the actual install so npm cannot resolve
+# from a stale dist-tag cached locally — the version floor in
+# install_or_upgrade_opencode depends on this returning the newest
+# published version, not whatever happens to be cached.
 auto_npm_install() {
   # auto_npm_install <pkg> <bin-name> <human-label>
   local pkg="$1" bin_name="$2" label="$3"
@@ -90,32 +114,69 @@ auto_npm_install() {
     err "  Install Node + npm first (Node 20+), then re-run this script."
     return 1
   fi
+  local pkg_spec="${pkg}@latest"
   local log_file
   log_file="$(mktemp -t opencode-anycli-npm.XXXXXX)"
-  info "Running: npm install -g $pkg"
-  if [ "$USE_SUDO" -eq 1 ]; then
-    if sudo npm install -g "$pkg"; then : ; else
-      err "sudo npm install -g $pkg failed."
-      rm -f "$log_file"
-      return 1
-    fi
-  else
-    if npm install -g "$pkg" 2>&1 | tee "$log_file"; then
-      :
+
+  # Run npm and capture its real exit status through the pipe. local
+  # cannot carry PIPESTATUS, so split the declaration from the assignment.
+  local npm_status
+  _run_npm_install() {
+    local target="$1"
+    if [ "$USE_SUDO" -eq 1 ]; then
+      sudo npm install -g "$target" 2>&1 | tee "$log_file"
     else
-      if grep -qE "EACCES|permission denied" "$log_file" 2>/dev/null; then
-        warn "npm reported a permission error. Re-running with sudo..."
-        if sudo npm install -g "$pkg"; then : ; else
-          err "sudo npm install -g $pkg also failed."
-          rm -f "$log_file"
-          return 1
-        fi
-      else
-        err "npm install -g $pkg failed (see output above)."
-        rm -f "$log_file"
-        return 1
-      fi
+      npm install -g "$target" 2>&1 | tee "$log_file"
     fi
+    return "${PIPESTATUS[0]}"
+  }
+
+  info "Running: npm install -g $pkg_spec"
+  _run_npm_install "$pkg_spec"
+  npm_status=$?
+
+  # ENOTEMPTY repair — only safe when we're installing into a user-owned
+  # tree (no sudo). Look at the lib/node_modules dir npm itself targets;
+  # nuke the package dir and every .pkg-* shadow sibling under it; retry.
+  if [ "$npm_status" -ne 0 ] && [ "$USE_SUDO" -ne 1 ] \
+     && grep -q "ENOTEMPTY" "$log_file" 2>/dev/null; then
+    warn "npm hit ENOTEMPTY — a previous interrupted install left shadow dirs."
+    local npm_prefix global_modules
+    npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+    global_modules="${npm_prefix:+$npm_prefix/lib/node_modules}"
+    if [ -n "$global_modules" ] && [ -d "$global_modules" ] \
+       && [ -w "$global_modules" ]; then
+      info "Cleaning $global_modules/$pkg + shadow siblings, then retrying"
+      rm -rf "$global_modules/$pkg" 2>/dev/null || true
+      # Shadow dirs look like .opencode-ai-HJFGfa0l. Be conservative — only
+      # remove ones whose suffix starts with the package basename.
+      local base="${pkg##*/}"
+      find "$global_modules" -maxdepth 1 -type d -name ".${base}-*" \
+        -exec rm -rf {} + 2>/dev/null || true
+      _run_npm_install "$pkg_spec"
+      npm_status=$?
+    else
+      warn "  Cannot self-heal: global modules dir missing or not writable."
+      warn "  Manual recovery:"
+      warn "    rm -rf \"\$(npm prefix -g)/lib/node_modules/$pkg\""
+      warn "    rm -rf \"\$(npm prefix -g)/lib/node_modules/.${pkg##*/}\"-*"
+      warn "    npm install -g $pkg_spec"
+    fi
+  fi
+
+  # EACCES repair (unchanged from before, just re-flowed against the new
+  # PIPESTATUS-aware status capture).
+  if [ "$npm_status" -ne 0 ] && [ "$USE_SUDO" -ne 1 ] \
+     && grep -qE "EACCES|permission denied" "$log_file" 2>/dev/null; then
+    warn "npm reported a permission error. Re-running with sudo..."
+    sudo npm install -g "$pkg_spec" 2>&1 | tee "$log_file"
+    npm_status="${PIPESTATUS[0]}"
+  fi
+
+  if [ "$npm_status" -ne 0 ]; then
+    err "npm install -g $pkg_spec failed (exit $npm_status, see output above)."
+    rm -f "$log_file"
+    return 1
   fi
   rm -f "$log_file"
   if ! command -v "$bin_name" >/dev/null 2>&1; then
