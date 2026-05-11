@@ -23,6 +23,7 @@ step()  { printf "\n${BLUE}▶${RESET} %s\n" "$*"; }
 # ─── Args ─────────────────────────────────────────────────────────────────────
 USER_INSTALL=0
 SKIP_BUILD=0
+REBUILD=0
 USE_SUDO=0
 NO_AUTO_DEPS=0
 NO_LSP_DEPS=0
@@ -30,13 +31,14 @@ for arg in "$@"; do
   case "$arg" in
     --user) USER_INSTALL=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
+    --rebuild) REBUILD=1 ;;
     --sudo) USE_SUDO=1 ;;
     --no-auto-deps) NO_AUTO_DEPS=1 ;;
     --no-lsp-deps) NO_LSP_DEPS=1 ;;
     --yes|-y) ;;            # accepted for backwards-compat; auto-install is now default
     -h|--help)
       cat <<EOF
-Usage: ./install.sh [--skip-build] [--no-auto-deps] [--no-lsp-deps]
+Usage: ./install.sh [--skip-build] [--rebuild] [--no-auto-deps] [--no-lsp-deps]
 
   opencode-anycli treats opencode + cline as bundled runtime dependencies.
   If either is missing, this installer fetches them via npm by default —
@@ -49,6 +51,8 @@ Usage: ./install.sh [--skip-build] [--no-auto-deps] [--no-lsp-deps]
   'source' the rc file to use the 'opencode-anycli' command.
 
   --skip-build     Skip the workspace build step (assumes dist/ exists)
+  --rebuild        Force a fresh build of every workspace, bypassing the
+                   "dist already newer than src" cache check.
   --no-auto-deps   Air-gap mode: fail if opencode/cline are missing
                    instead of running 'npm install -g'
   --no-lsp-deps    Skip auto-install of typescript-language-server.
@@ -148,15 +152,79 @@ fi
 ok "Node v$NODE_VER"
 
 # ─── 3. opencode binary (bundled runtime — auto-installed on demand) ─────────
+# Why a minimum version check lives here: opencode-anycli ships a tui.json
+# (templates/tui.json) and a TUI plugin (packages/tui-plugin-exit-confirm)
+# that both target opencode ≥ 1.14:
+#   - Keybind names `prompt_submit`, `input_submit`, `input_newline` were
+#     introduced in 1.14 alongside the strict tui.json schema
+#     (`additionalProperties: false`). On older opencode these names are
+#     unknown and the whole keybind override block is silently dropped, so
+#     Ctrl+C falls back to default app_exit and Enter falls back to submit.
+#   - The plugin intercepts Ctrl+C via `api.renderer.keyInput.on("keypress")`,
+#     an API that only exists in 1.14+. On older builds the plugin loads
+#     but the guard at the top short-circuits and no handler is attached.
+# Additionally we have a concrete report of 1.14.41 failing to load the
+# plugin even though dist/tui.json/file:// URL are all valid, with the fix
+# being a bump to 1.14.48 — so the floor here is the highest known-good
+# point release we've observed working, not just 1.14.0.
+OPENCODE_MIN_VER="1.14.48"
+opencode_version_meets_min() {
+  # Returns 0 (true) if "$1" >= OPENCODE_MIN_VER under SemVer, 1 otherwise.
+  # Pure-bash compare; no jq/sort -V dependency so we work the same on
+  # macOS BSD coreutils and stripped-down Linux containers.
+  local have="$1" need="$OPENCODE_MIN_VER"
+  local IFS=.
+  # shellcheck disable=SC2206
+  local h=($have) n=($need)
+  for i in 0 1 2; do
+    local hp="${h[$i]:-0}" np="${n[$i]:-0}"
+    # Strip any pre-release suffix (e.g. "48-beta.1") for the compare.
+    hp="${hp%%[!0-9]*}"; np="${np%%[!0-9]*}"
+    hp="${hp:-0}"; np="${np:-0}"
+    if [ "$hp" -gt "$np" ]; then return 0; fi
+    if [ "$hp" -lt "$np" ]; then return 1; fi
+  done
+  return 0
+}
+
+# Single source of truth for the install + upgrade paths so we don't drift.
+install_or_upgrade_opencode() {
+  if [ "$NO_AUTO_DEPS" -eq 1 ]; then
+    err "opencode ≥ $OPENCODE_MIN_VER required and --no-auto-deps was specified."
+    err "  Upgrade manually: npm install -g opencode-ai@latest"
+    return 1
+  fi
+  auto_npm_install opencode-ai opencode "opencode"
+}
+
 if command -v opencode >/dev/null 2>&1; then
-  ok "opencode: $(opencode --version 2>&1 | head -n1)"
+  current_oc_ver="$(opencode --version 2>&1 | head -n1 | sed -E 's/^v//; s/[[:space:]]+$//')"
+  if opencode_version_meets_min "$current_oc_ver"; then
+    ok "opencode: $current_oc_ver (≥ $OPENCODE_MIN_VER)"
+  else
+    warn "opencode $current_oc_ver is older than the required $OPENCODE_MIN_VER."
+    warn "  Older builds silently drop our tui.json keybinds and fail to load the"
+    warn "  Ctrl+C exit-confirm plugin, so the install would 'succeed' but the"
+    warn "  Ctrl+C dialog and Shift+Enter newline never take effect. Upgrading…"
+    install_or_upgrade_opencode || exit 1
+    # Re-verify — npm could silently install something that still doesn't
+    # satisfy the floor (e.g. a dist-tag pin in the registry, a sticky
+    # npm cache). Bail loudly rather than continuing into a broken state.
+    new_oc_ver="$(opencode --version 2>&1 | head -n1 | sed -E 's/^v//; s/[[:space:]]+$//')"
+    if ! opencode_version_meets_min "$new_oc_ver"; then
+      err "opencode is still $new_oc_ver after upgrade attempt (need ≥ $OPENCODE_MIN_VER)."
+      err "  Try: npm install -g opencode-ai@latest"
+      exit 1
+    fi
+    ok "opencode: $new_oc_ver"
+  fi
 elif [ "$NO_AUTO_DEPS" -eq 1 ]; then
   err "opencode not found on PATH and --no-auto-deps was specified."
   err "  Install manually: npm install -g opencode-ai"
   exit 1
 else
   step "opencode is part of opencode-anycli's runtime; installing it now"
-  auto_npm_install opencode-ai opencode "opencode" || exit 1
+  install_or_upgrade_opencode || exit 1
 fi
 
 # ─── 4. cline binary (bundled runtime — auto-installed on demand) ────────────
@@ -200,19 +268,64 @@ else
     warn "typescript-language-server install failed; LSP panel for TS/JS will stay empty."
 fi
 
-# ─── 5. Build the provider ────────────────────────────────────────────────────
-PROVIDER_DIST_CHECK="$REPO_DIR/packages/provider-cline-cli/dist/index.js"
-CLI_DIST_CHECK="$REPO_DIR/packages/cli/dist/index.js"
+# ─── 5. Build the workspaces ──────────────────────────────────────────────────
+# Why this is more than a per-package mtime compare: previous versions only
+# tested provider-cline-cli/dist/index.js + cli/dist/index.js against their
+# matching src/index.ts. That missed packages/tui-plugin-exit-confirm
+# entirely — so when a commit only touched the plugin's source (as several
+# recent Ctrl+C fixes did), every other machine running ./install.sh would
+# see "cli + provider dist look fresh, skip build" and silently keep the
+# stale plugin dist. tui.json points opencode at a file:// URL that
+# resolved fine, but the JS at that path was old → Ctrl+C dialog never
+# appeared and Enter behaviour didn't update.
+#
+# Fix: enumerate every workspace package, and rebuild if ANY package's
+# dist is missing or older than ANY file under its src/. `find -newer`
+# is supported by both GNU and BSD find so this stays portable.
+needs_build() {
+  # Always rebuild when node_modules is gone — npm/bun won't even resolve
+  # the @opencode-ai/plugin types needed to typecheck the plugin source.
+  if [ ! -d "$REPO_DIR/node_modules" ]; then return 0; fi
+  local pkg_dir dist_file src_dir
+  # (pkg_dir|primary_dist_file) pairs. Adding a new workspace? Add it here.
+  local pairs=(
+    "$REPO_DIR/packages/cli|$REPO_DIR/packages/cli/dist/index.js"
+    "$REPO_DIR/packages/provider-cline-cli|$REPO_DIR/packages/provider-cline-cli/dist/index.js"
+    "$REPO_DIR/packages/tui-plugin-exit-confirm|$REPO_DIR/packages/tui-plugin-exit-confirm/dist/tui.js"
+  )
+  for pair in "${pairs[@]}"; do
+    pkg_dir="${pair%|*}"
+    dist_file="${pair#*|}"
+    src_dir="$pkg_dir/src"
+    if [ ! -f "$dist_file" ]; then return 0; fi
+    if [ ! -d "$src_dir" ]; then continue; fi
+    # Any source file newer than the dist → out of date. Limit to -type f
+    # so we don't trip on directory mtime changes from `git checkout`.
+    if find "$src_dir" -type f -newer "$dist_file" 2>/dev/null | grep -q .; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ "$SKIP_BUILD" -eq 1 ]; then
   warn "--skip-build set; skipping build."
-elif [ -f "$PROVIDER_DIST_CHECK" ] && [ -f "$CLI_DIST_CHECK" ] \
-     && [ -d "$REPO_DIR/node_modules" ] \
-     && [ "$PROVIDER_DIST_CHECK" -nt "$REPO_DIR/packages/provider-cline-cli/src/index.ts" ] \
-     && [ "$CLI_DIST_CHECK" -nt "$REPO_DIR/packages/cli/src/index.ts" ]; then
-  step "Build artifacts already present and newer than sources; skipping build"
-  info "Pass --rebuild to force a rebuild (not yet implemented; remove dist/ + node_modules/ to force)"
+elif [ "$REBUILD" -eq 0 ] && ! needs_build; then
+  step "Build artifacts already present and newer than sources across every workspace; skipping build"
+  info "Pass --rebuild to force a fresh build"
 else
-  step "Building workspaces"
+  if [ "$REBUILD" -eq 1 ]; then
+    step "Rebuilding workspaces (--rebuild)"
+    # Wipe every dist/ before rebuilding so stale bundles can't survive a
+    # tsup incremental-skip. Leave node_modules alone — the user can blow
+    # those away separately with uninstall.sh --purge-build if needed.
+    rm -rf \
+      "$REPO_DIR/packages/cli/dist" \
+      "$REPO_DIR/packages/provider-cline-cli/dist" \
+      "$REPO_DIR/packages/tui-plugin-exit-confirm/dist"
+  else
+    step "Building workspaces"
+  fi
   cd "$REPO_DIR"
   if command -v bun >/dev/null 2>&1; then
     info "bun found; using bun install + build"
@@ -409,6 +522,30 @@ if [ -n "$RC_FILE" ]; then
     *":$BIN_DIR:"*) NEEDS_PATH_RELOAD=0 ;;
     *)              NEEDS_PATH_RELOAD=1 ;;
   esac
+fi
+
+# Legacy-binary shadowing check. If a previous --sudo / --user install
+# left a real `opencode-anycli` (not a symlink to BIN_DIR) at a higher-
+# priority PATH location, the user's shell will keep invoking that stale
+# entry instead of the freshly-built one — same symptom as a stale dist,
+# but with no obvious clue from the install output. We check what
+# `command -v opencode-anycli` resolves to right now (the script's PATH
+# already mirrors the parent shell's at this point) and compare its real
+# path against our BIN_DIR entry. Mismatch → tell the user exactly what
+# to delete and where.
+RESOLVED_CLI="$(command -v opencode-anycli 2>/dev/null || true)"
+if [ -n "$RESOLVED_CLI" ]; then
+  RESOLVED_CLI_REAL="$(readlink -f "$RESOLVED_CLI" 2>/dev/null || printf '%s' "$RESOLVED_CLI")"
+  EXPECTED_CLI_REAL="$(readlink -f "$BIN_DIR/opencode-anycli" 2>/dev/null || printf '%s' "$BIN_DIR/opencode-anycli")"
+  if [ "$RESOLVED_CLI_REAL" != "$EXPECTED_CLI_REAL" ]; then
+    warn "PATH conflict: 'opencode-anycli' on PATH resolves to a different binary"
+    note "found    : $RESOLVED_CLI"
+    note "expected : $BIN_DIR/opencode-anycli"
+    warn "  The shadowing entry is from a previous install. Remove it so this"
+    warn "  fresh build wins on PATH (use sudo if it is root-owned):"
+    note "  rm -f \"$RESOLVED_CLI\""
+    warn "  Then open a new shell or 'source' your rc file."
+  fi
 fi
 
 # ─── 8. Next steps ────────────────────────────────────────────────────────────
