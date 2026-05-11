@@ -40,26 +40,85 @@ else
   nope "node not found on PATH"
 fi
 
+# Shared helper: report on a CLI binary by its --version handshake.
+#
+# Why this is non-trivial: the previous implementation took the first
+# line of `<bin> --version 2>&1` and reported it as the "version" with
+# a ✓ marker, with no exit-code check. When cline crashes on Node 18
+# with `SyntaxError: Invalid regular expression flags` (string-width
+# uses the regex `v` flag, V8 12+ only), the first line of stderr is
+# the file path of the failing module — and doctor cheerfully reported
+# "✓ cline found: file:///.../string-width/index.js:19". A real user
+# wasted significant time on PATH theories before the underlying Node
+# version surfaced.
+#
+# This helper instead:
+#   * Captures stdout AND stderr separately, plus the real exit code.
+#   * Differentiates "not on PATH" from "found but exited non-zero".
+#   * In the crash case, surfaces the resolved path + stderr so the
+#     user can read the actual error, and adds an explicit Node
+#     version hint if the output fingerprints the regex `v` flag
+#     SyntaxError (or if we're already running on Node < 20).
+check_bin_version() {
+  # check_bin_version <binary> <human-label> <install-hint>
+  local bin="$1" label="$2" install_hint="$3"
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    nope "$label not on PATH"
+    note "Install: $install_hint"
+    return 1
+  fi
+  local resolved out_file err_file rc
+  resolved="$(command -v "$bin")"
+  out_file="$(mktemp)"; err_file="$(mktemp)"
+  "$bin" --version >"$out_file" 2>"$err_file"
+  rc=$?
+  local combined
+  combined="$(cat "$err_file" "$out_file" 2>/dev/null)"
+  if [ "$rc" -eq 0 ]; then
+    local version
+    version="$(head -n1 "$out_file" 2>/dev/null)"
+    [ -z "$version" ] && version="$(head -n1 "$err_file" 2>/dev/null)"
+    ok "$label found: ${version:-(no --version output)}"
+    note "$resolved"
+    rm -f "$out_file" "$err_file"
+    return 0
+  fi
+  nope "$label found at $resolved but '--version' failed (exit $rc)"
+  # Fingerprint the regex-v-flag SyntaxError, the single recurring
+  # cause we've documented. Match either the explicit message or the
+  # bare `/.../v` literal that V8 prints under a caret.
+  local node_major
+  node_major="$(node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')"
+  if printf '%s' "$combined" | grep -qE 'SyntaxError.*[Ii]nvalid regular expression' \
+     || printf '%s' "$combined" | grep -qE '/[^[:space:]]*\$/v[;,]?[[:space:]]*$' \
+     || { [ -n "$node_major" ] && [ "$node_major" -lt 20 ] 2>/dev/null; }; then
+    note "Looks like a Node version mismatch — $label requires Node 20+."
+    note "  (cline/opencode depend on string-width which uses the regex \`v\` flag,"
+    note "   a V8 12+ feature unavailable in Node 18.)"
+    note "Fix: nvm install 22 && nvm alias default 22, open a new shell, retry."
+  else
+    note "Re-run \`$bin --version\` directly to read the failure."
+  fi
+  if [ -s "$err_file" ]; then
+    note "---- $bin --version stderr ----"
+    sed 's/^/    /' "$err_file"
+  fi
+  rm -f "$out_file" "$err_file"
+  return 1
+}
+
 # ─── opencode ─────────────────────────────────────────────────────────────────
 section "opencode"
-if command -v opencode >/dev/null 2>&1; then
-  OPV="$(opencode --version 2>&1 | head -n1)"
-  ok "opencode found: $OPV"
-  note "$(command -v opencode)"
-else
-  nope "opencode not on PATH"
-  note "Install: npm install -g opencode-ai"
+OPENCODE_OK=0
+if check_bin_version opencode "opencode" "npm install -g opencode-ai"; then
+  OPENCODE_OK=1
 fi
 
 # ─── cline ────────────────────────────────────────────────────────────────────
 section "cline"
-if command -v cline >/dev/null 2>&1; then
-  CLV="$(cline --version 2>&1 | head -n1)"
-  ok "cline found: $CLV"
-  note "$(command -v cline)"
-else
-  nope "cline not on PATH"
-  note "Install: npm install -g cline"
+CLINE_OK=0
+if check_bin_version cline "cline" "npm install -g cline"; then
+  CLINE_OK=1
 fi
 
 # ─── cline config ─────────────────────────────────────────────────────────────
@@ -214,8 +273,15 @@ else
 fi
 
 # ─── Smoke test ───────────────────────────────────────────────────────────────
+# Skip the smoke when cline's --version check already failed: a cline that
+# can't even print its own version is guaranteed to fail this test, and the
+# resulting "Inspect output: /tmp/tmp.XXX" pointer just makes the user
+# chase an empty file when the actual root cause (Node version, missing
+# binary, etc.) is already explained in the cline section above.
 section "Smoke test (cline → 'doctor ok')"
-if command -v cline >/dev/null 2>&1; then
+if [ "$CLINE_OK" -ne 1 ]; then
+  warn "skipping (cline --version did not succeed — see cline section above)"
+elif command -v cline >/dev/null 2>&1; then
   TMP_OUT="$(mktemp)"
   ( cline --json --yolo --act "say exactly: doctor ok" >"$TMP_OUT" 2>/dev/null ) &
   SMOKE_PID=$!
