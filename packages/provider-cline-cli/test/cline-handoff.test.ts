@@ -52,6 +52,36 @@ describe("composeClineHandoff", () => {
     expect(result.diagnostics.policyId).toBe("diff-review")
   })
 
+  it("applies command policy budgets to older conversation context", () => {
+    const oldContext = "old-context-head\n" + "x".repeat(12000) + "\nold-context-tail"
+    const result = composeClineHandoff({
+      prompt: [
+        { role: "assistant", content: oldContext },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: [
+                '<handoff-context-policy id="release-git">',
+                "keep: latest_user, git_status, staged_diff",
+                "</handoff-context-policy>",
+                "write a commit message",
+              ].join("\n"),
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(result.diagnostics.policyId).toBe("release-git")
+    expect(result.text).toContain("write a commit message")
+    expect(result.text).toContain("old-context-head")
+    expect(result.text).toContain("old-context-tail")
+    expect(result.text).toContain("[assistant context omitted")
+    expect(result.text).not.toContain("x".repeat(8000))
+  })
+
   it("keeps tool messages in a dedicated observations section", () => {
     const result = composeClineHandoff({
       prompt: [

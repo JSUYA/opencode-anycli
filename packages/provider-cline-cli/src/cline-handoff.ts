@@ -41,12 +41,82 @@ interface ToolSummaryBudget {
   metadataBytes: number
 }
 
+interface HandoffPolicyProfile {
+  contextHeadBytes: number
+  contextTailBytes: number
+  toolBudget: ToolSummaryBudget
+}
+
 const DEFAULT_TOOL_SUMMARY_BUDGET: ToolSummaryBudget = {
   textHeadBytes: 2048,
   textTailBytes: 2048,
   errorHeadBytes: 4096,
   errorTailBytes: 4096,
   metadataBytes: 4096,
+}
+
+const DEFAULT_POLICY_PROFILE: HandoffPolicyProfile = {
+  contextHeadBytes: 8192,
+  contextTailBytes: 4096,
+  toolBudget: DEFAULT_TOOL_SUMMARY_BUDGET,
+}
+
+const POLICY_PROFILES: Record<string, HandoffPolicyProfile> = {
+  "diff-review": {
+    contextHeadBytes: 4096,
+    contextTailBytes: 4096,
+    toolBudget: {
+      textHeadBytes: 2048,
+      textTailBytes: 2048,
+      errorHeadBytes: 4096,
+      errorTailBytes: 4096,
+      metadataBytes: 2048,
+    },
+  },
+  "debug-diagnose": {
+    contextHeadBytes: 8192,
+    contextTailBytes: 4096,
+    toolBudget: {
+      textHeadBytes: 3072,
+      textTailBytes: 3072,
+      errorHeadBytes: 8192,
+      errorTailBytes: 8192,
+      metadataBytes: 4096,
+    },
+  },
+  "test-writing": {
+    contextHeadBytes: 8192,
+    contextTailBytes: 4096,
+    toolBudget: {
+      textHeadBytes: 4096,
+      textTailBytes: 4096,
+      errorHeadBytes: 6144,
+      errorTailBytes: 6144,
+      metadataBytes: 4096,
+    },
+  },
+  "release-git": {
+    contextHeadBytes: 4096,
+    contextTailBytes: 2048,
+    toolBudget: {
+      textHeadBytes: 1536,
+      textTailBytes: 1536,
+      errorHeadBytes: 4096,
+      errorTailBytes: 2048,
+      metadataBytes: 2048,
+    },
+  },
+  "doc-explain": {
+    contextHeadBytes: 12288,
+    contextTailBytes: 4096,
+    toolBudget: {
+      textHeadBytes: 4096,
+      textTailBytes: 4096,
+      errorHeadBytes: 4096,
+      errorTailBytes: 4096,
+      metadataBytes: 4096,
+    },
+  },
 }
 
 export function composeClineHandoff(input: ClineHandoffInput): ClineHandoffResult {
@@ -61,10 +131,13 @@ export function composeClineHandoff(input: ClineHandoffInput): ClineHandoffResul
     return { message, parsed }
   })
 
+  const policyProfile = profileForPolicy(policyId)
   const cleaned = parsedMessages
     .map(({ message, parsed }) => {
       const text =
-        message.role === "tool" ? stringifyContent(message.content, { summarizeToolResults: true }) : parsed.text
+        message.role === "tool"
+          ? stringifyContent(message.content, { summarizeToolResults: true, toolBudget: policyProfile.toolBudget })
+          : parsed.text
       return { ...message, text: text.trim() }
     })
     .filter((message) => message.text.length > 0)
@@ -87,7 +160,11 @@ export function composeClineHandoff(input: ClineHandoffInput): ClineHandoffResul
     "INSTRUCTIONS",
     [...systemAndDeveloper.map(formatMessageForContext), ...commandInstructions].join("\n\n"),
   )
-  pushSection(sections, "RELEVANT_CONTEXT", contextMessages.map(formatMessageForContext).join("\n\n"))
+  pushSection(
+    sections,
+    "RELEVANT_CONTEXT",
+    contextMessages.map((message) => formatContextMessage(message, policyProfile)).join("\n\n"),
+  )
   pushSection(sections, "TOOL_OBSERVATIONS", toolMessages.map(formatMessageForContext).join("\n\n"))
   if (policyId !== null) pushSection(sections, "CONTEXT_POLICY", `id: ${policyId}`)
 
@@ -176,7 +253,24 @@ function classifyMessageSection(message: NormalizedMessage, latestUserOriginalIn
   return "relevant_context"
 }
 
-function stringifyContent(content: unknown, options: { summarizeToolResults?: boolean } = {}): string {
+function profileForPolicy(policyId: string | null): HandoffPolicyProfile {
+  if (policyId === null) return DEFAULT_POLICY_PROFILE
+  return POLICY_PROFILES[policyId] ?? DEFAULT_POLICY_PROFILE
+}
+
+function formatContextMessage(message: NormalizedMessage, policy: HandoffPolicyProfile): string {
+  return summarizeText(
+    formatMessageForContext(message),
+    policy.contextHeadBytes,
+    policy.contextTailBytes,
+    `${message.role} context`,
+  )
+}
+
+function stringifyContent(
+  content: unknown,
+  options: { summarizeToolResults?: boolean; toolBudget?: ToolSummaryBudget } = {},
+): string {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) {
     if (content === null || content === undefined) return ""
@@ -201,7 +295,7 @@ function stringifyContent(content: unknown, options: { summarizeToolResults?: bo
         break
       case "tool-result":
         if (options.summarizeToolResults) {
-          out.push(formatToolResultSummary(String(p.toolName ?? ""), p.output, DEFAULT_TOOL_SUMMARY_BUDGET))
+          out.push(formatToolResultSummary(String(p.toolName ?? ""), p.output, options.toolBudget ?? DEFAULT_TOOL_SUMMARY_BUDGET))
         } else {
           out.push(`<tool-result name="${String(p.toolName ?? "")}">${safeJson(p.output)}</tool-result>`)
         }
