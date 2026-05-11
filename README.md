@@ -361,7 +361,7 @@ session you open in an unfamiliar repo.
 ## Uninstall
 
 ```bash
-./uninstall.sh                 # remove the opencode-anycli symlink only
+./uninstall.sh                 # remove the managed PATH block and legacy binaries
 ./uninstall.sh --purge-config  # also remove ~/.config/opencode-anycli/
 ./uninstall.sh --purge-build   # also remove dist/ + node_modules/
 ./uninstall.sh --purge-all     # both of the above
@@ -385,16 +385,17 @@ The adapter implements the Vercel AI SDK v3 `LanguageModelV3` interface expected
 ## Modes
 
 - `subprocess` (default): spawns `cline --json --yolo --act <prompt>`. Simple
-  and proven, but the prompt is a single positional argument so the kernel
-  argv limit (`ARG_MAX` — typically 256 KiB on macOS, 4 MiB on Linux) caps
-  how much conversation can be passed. Long sessions or large pasted file
-  context eventually trip `Failed to spawn cline: spawn E2BIG`.
+  and proven. Large prompts are automatically spilled to a private temp file
+  before they hit Linux's per-argument size limit (`MAX_ARG_STRLEN`, commonly
+  128 KiB on 4 KiB-page systems) or macOS argv limits, avoiding
+  `Failed to spawn cline: spawn E2BIG` while staying compatible with normal
+  cline `--act` mode.
 - `acp` (opt-in): spawns `cline --acp` and speaks the
   [Agent Client Protocol](https://agentclientprotocol.com) over stdio JSON-RPC.
-  The prompt travels in the message body, not argv, so `ARG_MAX` does not
+  The prompt travels in the message body, not argv, so argv limits do not
   apply — long inputs are bounded only by cline's internal limits and
-  available memory. Recommended whenever you hit `E2BIG` or expect
-  conversation history to grow large.
+  available memory. Use it when you specifically want the ACP transport or
+  richer structured updates.
 - `passthrough` (planned): would read cline settings and call the model
   directly from opencode. Not yet implemented.
 

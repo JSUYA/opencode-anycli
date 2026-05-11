@@ -2,7 +2,9 @@
 # uninstall.sh — remove what install.sh placed on this machine.
 #
 # What this removes:
-#   1. The `opencode-anycli` symlink in /usr/local/bin or ~/.local/bin
+#   1. The managed PATH block from shell rc files, plus any legacy
+#      `opencode-anycli` binary/symlink in /usr/local/bin, /usr/bin,
+#      ~/.local/bin, or npm's global bin
 #   2. Optionally: ~/.config/opencode-anycli/ (the wrapper's XDG home,
 #      including opencode.json + AGENTS.md + any .bak backups + anything
 #      oh-my-anycli installed under it). Default behaviour KEEPS the
@@ -16,7 +18,7 @@
 #   - The user's standard ~/.config/opencode/ (we use opencode-anycli/).
 #
 # Usage:
-#   ./uninstall.sh                 # remove symlink only, keep config + build
+#   ./uninstall.sh                 # remove PATH block + legacy binaries only
 #   ./uninstall.sh --purge-config  # also remove ~/.config/opencode-anycli/
 #   ./uninstall.sh --purge-build   # also remove this repo's dist/+node_modules
 #   ./uninstall.sh --purge-all     # both --purge-config and --purge-build

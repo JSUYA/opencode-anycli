@@ -27,6 +27,7 @@ REBUILD=0
 USE_SUDO=0
 NO_AUTO_DEPS=0
 NO_LSP_DEPS=0
+ASSUME_YES=0
 for arg in "$@"; do
   case "$arg" in
     --user) USER_INSTALL=1 ;;
@@ -35,7 +36,7 @@ for arg in "$@"; do
     --sudo) USE_SUDO=1 ;;
     --no-auto-deps) NO_AUTO_DEPS=1 ;;
     --no-lsp-deps) NO_LSP_DEPS=1 ;;
-    --yes|-y) ;;            # accepted for backwards-compat; auto-install is now default
+    --yes|-y) ASSUME_YES=1 ;; # accepted for backwards-compat; auto-install is now default
     -h|--help)
       cat <<EOF
 Usage: ./install.sh [--skip-build] [--rebuild] [--no-auto-deps] [--no-lsp-deps]

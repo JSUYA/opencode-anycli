@@ -151,7 +151,9 @@ section "install.sh: edited / corrupted block recovery"
 # T5: stale path (user moved repo) → replaced in place
 H=$(mk_home); : > "$H/.bashrc"
 run_install "$H" >/dev/null
-sed -i 's|packages/cli/bin|/old/wrong/path|' "$H/.bashrc"
+tmp_rc="$(mktemp)"
+sed 's|packages/cli/bin|/old/wrong/path|' "$H/.bashrc" > "$tmp_rc"
+mv "$tmp_rc" "$H/.bashrc"
 out=$(run_install "$H")
 assert_contains "T5 stale path → 'Replaced existing managed block'" "$out" "Replaced existing managed block"
 assert_eq "T5 still exactly 1 block" "$(managed_blocks "$H/.bashrc")" "1"

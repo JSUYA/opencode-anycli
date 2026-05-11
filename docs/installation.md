@@ -7,8 +7,10 @@ This guide installs OpenCode-AnyCLI so opencode can run through the local cline 
 | Item | Requirement |
 | --- | --- |
 | Node.js | 20 or newer |
-| opencode | Available on `PATH` |
-| cline | Available on `PATH` and configured once |
+| npm | Bundled with Node; used for workspace build and runtime dependency install |
+| git | Required for clone and `opencode-anycli --update` |
+| opencode | Auto-installed by `install.sh` via `npm install -g opencode-ai` when missing |
+| cline | Auto-installed by `install.sh` via `npm install -g cline` when missing; run once to configure credentials |
 | Bun | Optional; npm is used when Bun is unavailable |
 
 ## Quick Install
@@ -19,15 +21,17 @@ cd opencode-anycli
 ./install.sh
 ```
 
-The installer checks Node, opencode, and cline, builds the workspace, writes the default `opencode.json`, and links the `opencode-anycli` binary.
+The installer checks Node, opencode, and cline, builds the workspace, writes the default `opencode.json` and `tui.json`, and adds the repo's `packages/cli/bin` directory to your shell rc file with a managed PATH block.
 
 ## Options
 
 | Flag | Description |
 | --- | --- |
-| `--user` | Link the binary into `~/.local/bin` without sudo. |
-| `--sudo` | Use sudo when linking into `/usr/local/bin`. |
 | `--skip-build` | Reuse existing `dist/` outputs. |
+| `--rebuild` | Force a fresh workspace build. |
+| `--no-auto-deps` | Do not auto-install opencode/cline; fail if they are missing. |
+| `--no-lsp-deps` | Do not auto-install `typescript-language-server`. |
+| `--user`, `--sudo` | Deprecated no-ops kept for older wrapper commands. |
 
 ## Cline First Run
 
@@ -45,5 +49,7 @@ Complete cline's model and credential setup. OpenCode-AnyCLI expects `~/.cline/d
 tar czf opencode-anycli-bundle.tgz opencode-anycli/
 tar xzf opencode-anycli-bundle.tgz
 cd opencode-anycli
-./install.sh --skip-build --user
+./install.sh --skip-build
 ```
+
+`--user` is accepted for compatibility but no longer changes the install location; the PATH block is always used.

@@ -28,6 +28,14 @@ assert_contains() {
   fi
 }
 section() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
+line_count() {
+  wc -l | tr -d '[:space:]'
+}
+copy_dir_contents() {
+  local src="$1" dst="$2"
+  mkdir -p "$dst"
+  cp -R "$src"/. "$dst"/
+}
 
 setup_clone() {
   # Creates: /tmp/test-XXX/{upstream.git, clone}; clone tracks upstream.
@@ -47,14 +55,14 @@ setup_clone() {
   for pkg in "$REPO"/packages/*/; do
     local pkg_name; pkg_name=$(basename "$pkg")
     if [ -d "$pkg/dist" ]; then
-      rsync -a --quiet "$pkg/dist/" "$clone/packages/$pkg_name/dist/"
+      copy_dir_contents "$pkg/dist" "$clone/packages/$pkg_name/dist"
     fi
     if [ -d "$pkg/node_modules" ]; then
-      rsync -a --quiet "$pkg/node_modules/" "$clone/packages/$pkg_name/node_modules/"
+      copy_dir_contents "$pkg/node_modules" "$clone/packages/$pkg_name/node_modules"
     fi
   done
   if [ -d "$REPO/node_modules" ]; then
-    rsync -a --quiet "$REPO/node_modules/" "$clone/node_modules/"
+    copy_dir_contents "$REPO/node_modules" "$clone/node_modules"
   fi
   echo "$root"
 }
@@ -73,12 +81,12 @@ run_update() {
 section "--update: clean tree (no stash needed)"
 T=$(setup_clone); CLONE="$T/clone"
 out=$(run_update "$CLONE")
-assert_contains "T18 clean tree → did NOT print 'stashing local changes'" \
-  "$(printf '%s' "$out" | grep -c stashing)" "0"
+assert_eq "T18 clean tree → did NOT print 'stashing local changes'" \
+  "$(printf '%s' "$out" | grep -c stashing | tr -d '[:space:]')" "0"
 assert_contains "T18 clean tree → printed 'pulling latest'" "$out" "pulling latest"
 assert_contains "T18 clean tree → ran install.sh (PATH section)" "$out" "Adding opencode-anycli to your shell PATH"
 assert_eq "T18 clean tree → working tree still clean afterwards" \
-  "$(git -C "$CLONE" status --porcelain | wc -l)" "0"
+  "$(git -C "$CLONE" status --porcelain | line_count)" "0"
 rm -rf "$T"
 
 
@@ -99,7 +107,7 @@ assert_eq "T19 dirty tree → README local edit restored" \
 assert_eq "T19 dirty tree → untracked file restored" \
   "$([ -f "$CLONE/junsu-untracked.txt" ] && echo yes || echo no)" "yes"
 assert_eq "T19 dirty tree → no leftover stash entries" \
-  "$(git -C "$CLONE" stash list | wc -l)" "0"
+  "$(git -C "$CLONE" stash list | line_count)" "0"
 rm -rf "$T"
 
 
@@ -121,7 +129,7 @@ out=$(run_update "$CLONE")
 assert_contains "T20 conflict → 'stash pop' had conflicts surfaced" "$out" "stash pop"
 assert_contains "T20 conflict → 'still safe in stash@{0}' hint" "$out" "still safe in stash@{0}"
 # Stash should still exist
-n_stash=$(git -C "$CLONE" stash list | wc -l)
+n_stash=$(git -C "$CLONE" stash list | line_count)
 assert_eq "T20 conflict → stash@{0} preserved (1 entry)" "$n_stash" "1"
 # Stash message should mention 'opencode-anycli auto-stash'
 assert_contains "T20 conflict → stash message contains 'opencode-anycli auto-stash'" \
