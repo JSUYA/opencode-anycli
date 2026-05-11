@@ -46,6 +46,32 @@ OpenCode-AnyCLI does not improve model quality by itself; cline still uses the s
 
 For tiny edits or quick questions, direct cline CLI can still be faster. OpenCode-AnyCLI is most useful when the coding task benefits from navigation, repeatable process, and verification.
 
+## Prerequisites
+
+| Tool | Required version | Why |
+|---|---|---|
+| **Node.js** | **≥ 20** (`node -v`) | Enforced by `install.sh` and the `engines` field in every workspace `package.json`. Build target is `node20`. |
+| **npm** | bundled with Node 20+ (≥ 10) | Used to install `opencode-ai`, `cline`, and `typescript-language-server` globally, and to run the workspace build. |
+| **git** | any recent version | Required to `git clone` the repo and for `opencode-anycli --update`. |
+| **bun** | optional | If present, `install.sh` uses `bun install` + `bun run build` instead of npm. Falls back to npm cleanly when absent. |
+| OS | Linux or macOS | `install.sh` refuses other platforms. |
+
+If you're on Node 18 or older, upgrade first — `install.sh` will refuse to
+run otherwise. Quickest path:
+
+```bash
+# nvm
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+nvm install 20 && nvm use 20
+
+# or NodeSource (Ubuntu/Debian)
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+After upgrading, `node -v` should report `v20.x` (or newer) before
+continuing.
+
 ## Install
 
 ```bash

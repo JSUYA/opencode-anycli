@@ -98,7 +98,7 @@ const tui: TuiPlugin = async (api) => {
   const confirmExit = () => {
     disarm()
     api.ui.dialog.clear()
-    api.command.trigger("app.exit")
+    api.command?.trigger("app.exit")
   }
 
   const showDialog = () => {
@@ -148,7 +148,7 @@ const tui: TuiPlugin = async (api) => {
     }, REARM_WINDOW_MS)
   }
 
-  api.command.register((): TuiCommand[] => [
+  api.command?.register((): TuiCommand[] => [
     {
       title: "Exit opencode-anycli (with confirmation)",
       value: "opencode-anycli.exit-confirm",
