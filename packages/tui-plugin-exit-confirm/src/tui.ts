@@ -168,22 +168,41 @@ const tui: TuiPlugin = async (api) => {
   // propagation — so opencode's session/prompt-route handlers never see
   // this ctrl+c. We test for `ctrl && name === "c"` with no other modifier
   // so that ctrl+shift+c (copy on most terminals) still goes through.
-  api.renderer.keyInput.on("keypress", (evt) => {
-    if (evt.ctrl && evt.name === "c" && !evt.shift && !evt.meta && !evt.option) {
-      if (process.env["OPENCODE_ANYCLI_EXIT_CONFIRM_DEBUG"]) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const fs = require("node:fs") as typeof import("node:fs")
-          fs.appendFileSync(
-            process.env["OPENCODE_ANYCLI_EXIT_CONFIRM_DEBUG"],
-            `[${new Date().toISOString()}] ctrl+c intercepted (armed=${armed})\n`,
-          )
-        } catch { /* ignore */ }
+  const debugLogPath = process.env["OPENCODE_ANYCLI_EXIT_CONFIRM_DEBUG"]
+  const debugLog = (line: string) => {
+    if (!debugLogPath) return
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require("node:fs") as typeof import("node:fs")
+      fs.appendFileSync(debugLogPath, `[${new Date().toISOString()}] ${line}\n`)
+    } catch { /* ignore */ }
+  }
+
+  // Guard so we don't blow up if a future opencode build relocates the
+  // keypress emitter or hands the plugin a partial api shape.
+  if (!api.renderer?.keyInput?.on) {
+    debugLog(
+      `api.renderer.keyInput.on missing — cannot register ctrl+c handler ` +
+      `(renderer=${!!api.renderer}, keyInput=${!!api.renderer?.keyInput})`,
+    )
+  } else {
+    api.renderer.keyInput.on("keypress", (evt) => {
+      // Log EVERY keypress (not just ctrl+c) so the debug file shows
+      // exactly what opentui delivers to plugin-level listeners. If a
+      // user's ctrl+c never lands here, the event is being consumed
+      // somewhere upstream before plugins get a turn.
+      debugLog(
+        `keypress name=${evt.name} ctrl=${evt.ctrl} shift=${evt.shift} ` +
+        `meta=${evt.meta} option=${evt.option} sequence=${JSON.stringify(evt.sequence)}`,
+      )
+      if (evt.ctrl && evt.name === "c" && !evt.shift && !evt.meta && !evt.option) {
+        debugLog(`ctrl+c matched — opening dialog (armed=${armed})`)
+        onCtrlC()
+        evt.preventDefault()
       }
-      onCtrlC()
-      evt.preventDefault()
-    }
-  })
+    })
+    debugLog("ctrl+c handler registered on api.renderer.keyInput")
+  }
 
   api.lifecycle.onDispose(() => {
     if (armedTimer) clearTimeout(armedTimer)
