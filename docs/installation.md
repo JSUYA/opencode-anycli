@@ -1,17 +1,18 @@
 # Installation
 
-This guide installs OpenCode-AnyCLI so opencode can run through the local cline CLI.
+Install OpenCode-AnyCLI from a local checkout so opencode can run through your
+existing cline CLI setup.
 
 ## Prerequisites
 
 | Item | Requirement |
 | --- | --- |
 | Node.js | 20 or newer |
-| npm | Bundled with Node; used for workspace build and runtime dependency install |
+| npm | Bundled with Node; used for global runtime dependency installs |
 | git | Required for clone and `opencode-anycli --update` |
-| opencode | Auto-installed by `install.sh` via `npm install -g opencode-ai` when missing |
-| cline | Auto-installed by `install.sh` via `npm install -g cline` when missing; run once to configure credentials |
-| Bun | Optional; npm is used when Bun is unavailable |
+| opencode | Auto-installed or upgraded by `install.sh` unless `--no-auto-deps` is set |
+| cline | Auto-installed by `install.sh` unless `--no-auto-deps` is set |
+| Bun | Optional; used for workspace install/build when available, with npm as the fallback |
 
 ## Quick Install
 
@@ -19,9 +20,15 @@ This guide installs OpenCode-AnyCLI so opencode can run through the local cline 
 git clone https://github.com/JSUYA/opencode-anycli.git
 cd opencode-anycli
 ./install.sh
+# Open a new terminal, then run:
+opencode-anycli --doctor
+opencode-anycli
 ```
 
-The installer checks Node, opencode, and cline, builds the workspace, writes the default `opencode.json` and `tui.json`, and adds the repo's `packages/cli/bin` directory to your shell rc file with a managed PATH block.
+The installer checks Node, opencode, cline, and the TypeScript language server,
+builds the workspace, writes the default `opencode.json` and `tui.json`, and
+adds the repo's `packages/cli/bin` directory to your shell rc file with a
+managed PATH block.
 
 ## Options
 
@@ -31,25 +38,19 @@ The installer checks Node, opencode, and cline, builds the workspace, writes the
 | `--rebuild` | Force a fresh workspace build. |
 | `--no-auto-deps` | Do not auto-install opencode/cline; fail if they are missing. |
 | `--no-lsp-deps` | Do not auto-install `typescript-language-server`. |
-| `--user`, `--sudo` | Deprecated no-ops kept for older wrapper commands. |
+| `--yes`, `-y` | Skip installer confirmations. |
+
+`--user` and `--sudo` are accepted for compatibility with older wrapper
+commands, but current installs use the managed PATH block and do not need
+symlinks or sudo for the link step.
 
 ## Cline First Run
 
-Run cline once before using OpenCode-AnyCLI:
+If `opencode-anycli --doctor` reports that cline has not been configured, run
+cline once:
 
 ```bash
 cline
 ```
 
 Complete cline's model and credential setup. OpenCode-AnyCLI expects `~/.cline/data/globalState.json` to exist.
-
-## Reinstall From Existing Build
-
-```bash
-tar czf opencode-anycli-bundle.tgz opencode-anycli/
-tar xzf opencode-anycli-bundle.tgz
-cd opencode-anycli
-./install.sh --skip-build
-```
-
-`--user` is accepted for compatibility but no longer changes the install location; the PATH block is always used.

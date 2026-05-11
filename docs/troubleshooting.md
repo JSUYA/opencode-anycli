@@ -6,6 +6,16 @@ Start with:
 opencode-anycli --doctor
 ```
 
+## opencode-anycli Command Not Found
+
+Open a new terminal or source the shell rc file that `install.sh` updated:
+
+```bash
+source ~/.zshrc
+# or, for bash:
+source ~/.bashrc
+```
+
 ## cline Returns No Text
 
 Run cline directly:
@@ -36,11 +46,22 @@ cline
 
 ## Provider Dist Missing
 
-Build the workspace again:
+Rebuild through the installer so the config and plugin paths stay aligned:
 
 ```bash
-npm install --workspaces --include-workspace-root
-npm run build
+./install.sh --rebuild
+```
+
+For package development, `npm install --workspaces --include-workspace-root`
+and `npm run build` are still valid, but they do not rewrite installed config.
+
+## Permission Problems After Elevated Runs
+
+If a previous `--allow-dangerously-skip-permissions` session left root-owned
+files under opencode, cline, or npm cache directories, run:
+
+```bash
+opencode-anycli --fix
 ```
 
 ## Slow Responses
