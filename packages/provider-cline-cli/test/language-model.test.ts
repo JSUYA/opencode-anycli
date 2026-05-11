@@ -667,9 +667,11 @@ describe("ClineLanguageModel", () => {
       const log = readFileSync(promptLog, "utf8")
       expect(log).toContain('"mode": "generate"')
       expect(log).toContain('"mode": "stream"')
+      expect(log).toContain('"handoffBytes"')
       expect(log).toContain('"flattenedBytes"')
+      expect(log).toContain('"originalBytes"')
       expect(log).toContain('"messageBreakdown"')
-      expect(log).toContain("[USER]\\nuser request\\n[/USER]")
+      expect(log).toContain("[CURRENT_USER_REQUEST]\\nuser request\\n[/CURRENT_USER_REQUEST]")
     } finally {
       if (previous === undefined) delete process.env["OPENCODE_ANYCLI_PROMPTLOG"]
       else process.env["OPENCODE_ANYCLI_PROMPTLOG"] = previous

@@ -20,7 +20,7 @@ import type {
 } from "@ai-sdk/provider"
 import { runOnce, runStream } from "./cline-runner.js"
 import { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
-import { flattenPrompt } from "./prompt-flatten.js"
+import { composeClineHandoff, type ClineHandoffDiagnostics } from "./cline-handoff.js"
 import type { ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
 
 const DEFAULT_TIMEOUT_MS = 600_000
@@ -61,8 +61,9 @@ export class ClineLanguageModel implements LanguageModelV3 {
       throw new Error("Passthrough mode not yet implemented — see docs/provider-modes.md")
     }
 
-    const promptText = flattenPrompt({ prompt: options.prompt as ReadonlyArray<unknown> })
-    logPromptDebug("generate", options.prompt as ReadonlyArray<unknown>, promptText)
+    const handoff = composeClineHandoff({ prompt: options.prompt as ReadonlyArray<unknown> })
+    const promptText = handoff.text
+    logPromptDebug("generate", options.prompt as ReadonlyArray<unknown>, promptText, handoff.diagnostics)
     const runner = this.options.mode === "acp" ? runOnceAcp : runOnce
     const result = await runner({
       prompt: promptText,
@@ -102,8 +103,9 @@ export class ClineLanguageModel implements LanguageModelV3 {
       throw new Error("Passthrough mode not yet implemented — see docs/provider-modes.md")
     }
 
-    const promptText = flattenPrompt({ prompt: options.prompt as ReadonlyArray<unknown> })
-    logPromptDebug("stream", options.prompt as ReadonlyArray<unknown>, promptText)
+    const handoff = composeClineHandoff({ prompt: options.prompt as ReadonlyArray<unknown> })
+    const promptText = handoff.text
+    logPromptDebug("stream", options.prompt as ReadonlyArray<unknown>, promptText, handoff.diagnostics)
     const modelId = this.modelId
     const command = this.options.command
     const timeoutMs = this.options.timeoutMs
@@ -228,7 +230,12 @@ function cryptoRandomId(): string {
   return `cline-${randomUUID()}`
 }
 
-function logPromptDebug(mode: "generate" | "stream", prompt: ReadonlyArray<unknown>, flattened: string): void {
+function logPromptDebug(
+  mode: "generate" | "stream",
+  prompt: ReadonlyArray<unknown>,
+  handoff: string,
+  diagnostics: ClineHandoffDiagnostics,
+): void {
   const path = process.env["OPENCODE_ANYCLI_PROMPTLOG"]
   if (!path) return
   try {
@@ -238,10 +245,13 @@ function logPromptDebug(mode: "generate" | "stream", prompt: ReadonlyArray<unkno
         {
           ts: Date.now(),
           mode,
-          flattenedBytes: Buffer.byteLength(flattened, "utf8"),
-          messageBreakdown: prompt.map(summarizePromptMessage),
+          handoffBytes: diagnostics.handoffBytes,
+          flattenedBytes: diagnostics.handoffBytes,
+          originalBytes: diagnostics.originalBytes,
+          policyId: diagnostics.policyId,
+          messageBreakdown: diagnostics.messageBreakdown,
           promptArray: prompt,
-          flattened,
+          handoff,
         },
         null,
         2,
@@ -250,29 +260,6 @@ function logPromptDebug(mode: "generate" | "stream", prompt: ReadonlyArray<unkno
     )
   } catch {
     /* diagnostic logging must never break a model call */
-  }
-}
-
-function summarizePromptMessage(msg: unknown, index: number): Record<string, unknown> {
-  if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
-    return { index, role: "(invalid)", contentBytes: 0 }
-  }
-  const m = msg as { role?: unknown; content?: unknown }
-  const role = typeof m.role === "string" ? m.role : "user"
-  return {
-    index,
-    role,
-    contentBytes: estimateContentBytes(m.content),
-  }
-}
-
-function estimateContentBytes(content: unknown): number {
-  if (typeof content === "string") return Buffer.byteLength(content, "utf8")
-  if (content === null || content === undefined) return 0
-  try {
-    return Buffer.byteLength(JSON.stringify(content), "utf8")
-  } catch {
-    return Buffer.byteLength(String(content), "utf8")
   }
 }
 
