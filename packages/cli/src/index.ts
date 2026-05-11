@@ -400,6 +400,44 @@ function locateRepoArtifact(name: string): string | null {
   return null
 }
 
+/**
+ * Hard-fail the wrapper if the active Node major is below the floor we
+ * actually need. Why this exists despite package.json already declaring
+ * `engines.node >= 20`: engines is advisory and Node ignores it at run
+ * time, so a user on the Ubuntu 22.04 default (`/usr/bin/node` v18.19.1)
+ * will see the wrapper boot, call `cline --version` under that same old
+ * Node, and watch cline crash with `SyntaxError: Invalid regular
+ * expression flags` because string-width uses the regex `v` flag (V8
+ * 12+, i.e. Node 20+). Our previous error message in that case was
+ * "cline binary not found on PATH", which sent a real user on a long
+ * direnv/PATH-chasing wild goose chase before the node version showed
+ * itself. Failing here, with the node version stated up front, makes
+ * the diagnosis obvious.
+ *
+ * --help / --version / --doctor are exempt: they are info-only or are
+ * explicitly meant to diagnose exactly this situation.
+ */
+function ensureNodeVersion(): void {
+  const major = parseInt((process.versions.node || "0").split(".")[0] ?? "0", 10)
+  if (Number.isFinite(major) && major >= 20) return
+  process.stderr.write(
+    [
+      `opencode-anycli requires Node 20+, but you are running Node ${process.versions.node}.`,
+      ``,
+      `Why this hard-fails (instead of warning):`,
+      `  cline depends on string-width, which uses the regex \`v\` flag — a V8 12+`,
+      `  feature unavailable in Node 18. On older Node, cline throws SyntaxError`,
+      `  during module load and surfaces as a misleading "binary not found on PATH"`,
+      `  error downstream.`,
+      ``,
+      `Fix: install Node 20+ (nvm, fnm, NodeSource, or your distro's newer package),`,
+      `put it on PATH, verify with \`node -v\`, then re-run opencode-anycli.`,
+      ``,
+    ].join("\n"),
+  )
+  process.exit(1)
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
 
@@ -411,9 +449,19 @@ async function main(): Promise<void> {
     process.stdout.write(`opencode-anycli ${VERSION}\n`)
     return
   }
+  // --doctor is the canonical "tell me why my install is broken"
+  // entry point — it has to run even on a too-old node so the user
+  // can collect diagnostics.
   if (args.doctor) {
     runDoctor()
   }
+
+  // Everything else (running an actual opencode session, --fix, --update)
+  // depends on Node 20+ either directly or via cline/opencode. Gate here
+  // so the failure mode is "Node too old" instead of a misleading
+  // downstream symptom.
+  ensureNodeVersion()
+
   if (args.fix) {
     runFix(!!args.fixYes)
   }
