@@ -64,4 +64,55 @@ describe("composeClineHandoff", () => {
     expect(result.text).toContain("<tool-result name=\"bash\">")
     expect(result.diagnostics.messageBreakdown[1]?.handoffSection).toBe("tool_observations")
   })
+
+  it("summarizes large tool output with error-focused head and tail context", () => {
+    const middle = "M".repeat(10000)
+    const result = composeClineHandoff({
+      prompt: [
+        { role: "user", content: "diagnose the failing test" },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolName: "bash",
+              output: {
+                command: "npm test",
+                exitCode: 1,
+                stdout: `stdout-head\n${middle}\nstdout-tail`,
+                stderr: `stderr-head\n${middle}\nstderr-tail`,
+              },
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(result.text).toContain("command: npm test")
+    expect(result.text).toContain("exitCode: 1")
+    expect(result.text).toContain("stderr:")
+    expect(result.text).toContain("stderr-head")
+    expect(result.text).toContain("stderr-tail")
+    expect(result.text).toContain("[stderr omitted")
+    expect(result.text).toContain("stdout-head")
+    expect(result.text).toContain("stdout-tail")
+    expect(result.text).toContain("[stdout omitted")
+    expect(result.text).not.toContain("M".repeat(5000))
+  })
+
+  it("preserves the latest user request even when tool observations are truncated", () => {
+    const request = "current request " + "한글".repeat(1000)
+    const result = composeClineHandoff({
+      prompt: [
+        {
+          role: "tool",
+          content: [{ type: "tool-result", toolName: "bash", output: { stdout: "x".repeat(10000) } }],
+        },
+        { role: "user", content: request },
+      ],
+    })
+
+    expect(result.text).toContain(request)
+    expect(result.text).toContain("[stdout omitted")
+  })
 })

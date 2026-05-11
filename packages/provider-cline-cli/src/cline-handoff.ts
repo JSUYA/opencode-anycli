@@ -22,6 +22,7 @@ export interface ClineHandoffResult {
 interface NormalizedMessage {
   index: number
   role: string
+  content: unknown
   text: string
   contentBytes: number
 }
@@ -32,17 +33,39 @@ interface ParsedText {
   policyId: string | null
 }
 
+interface ToolSummaryBudget {
+  textHeadBytes: number
+  textTailBytes: number
+  errorHeadBytes: number
+  errorTailBytes: number
+  metadataBytes: number
+}
+
+const DEFAULT_TOOL_SUMMARY_BUDGET: ToolSummaryBudget = {
+  textHeadBytes: 2048,
+  textTailBytes: 2048,
+  errorHeadBytes: 4096,
+  errorTailBytes: 4096,
+  metadataBytes: 4096,
+}
+
 export function composeClineHandoff(input: ClineHandoffInput): ClineHandoffResult {
   const messages = normalizeMessages(input.prompt)
   const commandInstructions: string[] = []
   let policyId: string | null = null
 
-  const cleaned = messages
-    .map((message) => {
-      const parsed = parseStructuredBlocks(message.text)
-      commandInstructions.push(...parsed.commandInstructions)
-      if (policyId === null && parsed.policyId !== null) policyId = parsed.policyId
-      return { ...message, text: parsed.text.trim() }
+  const parsedMessages = messages.map((message) => {
+    const parsed = parseStructuredBlocks(message.text)
+    commandInstructions.push(...parsed.commandInstructions)
+    if (policyId === null && parsed.policyId !== null) policyId = parsed.policyId
+    return { message, parsed }
+  })
+
+  const cleaned = parsedMessages
+    .map(({ message, parsed }) => {
+      const text =
+        message.role === "tool" ? stringifyContent(message.content, { summarizeToolResults: true }) : parsed.text
+      return { ...message, text: text.trim() }
     })
     .filter((message) => message.text.length > 0)
 
@@ -96,6 +119,7 @@ function normalizeMessages(prompt: ReadonlyArray<unknown>): NormalizedMessage[] 
     messages.push({
       index,
       role,
+      content: m.content,
       text,
       contentBytes: estimateContentBytes(m.content),
     })
@@ -152,7 +176,7 @@ function classifyMessageSection(message: NormalizedMessage, latestUserOriginalIn
   return "relevant_context"
 }
 
-function stringifyContent(content: unknown): string {
+function stringifyContent(content: unknown, options: { summarizeToolResults?: boolean } = {}): string {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) {
     if (content === null || content === undefined) return ""
@@ -176,7 +200,11 @@ function stringifyContent(content: unknown): string {
         out.push(`<tool-call name="${String(p.toolName ?? "")}">${safeJson((p as { args?: unknown }).args)}</tool-call>`)
         break
       case "tool-result":
-        out.push(`<tool-result name="${String(p.toolName ?? "")}">${safeJson(p.output)}</tool-result>`)
+        if (options.summarizeToolResults) {
+          out.push(formatToolResultSummary(String(p.toolName ?? ""), p.output, DEFAULT_TOOL_SUMMARY_BUDGET))
+        } else {
+          out.push(`<tool-result name="${String(p.toolName ?? "")}">${safeJson(p.output)}</tool-result>`)
+        }
         break
       case "image":
         out.push("<image omitted: cline subprocess mode does not support binary inputs>")
@@ -189,6 +217,120 @@ function stringifyContent(content: unknown): string {
     }
   }
   return out.join("\n")
+}
+
+function formatToolResultSummary(toolName: string, output: unknown, budget: ToolSummaryBudget): string {
+  const lines = [`<tool-result name="${toolName}">`]
+  if (output === null || output === undefined) {
+    lines.push("(no output)")
+    lines.push("</tool-result>")
+    return lines.join("\n")
+  }
+
+  if (typeof output !== "object" || Array.isArray(output)) {
+    lines.push(summarizeText(String(output), budget.textHeadBytes, budget.textTailBytes, "output"))
+    lines.push("</tool-result>")
+    return lines.join("\n")
+  }
+
+  const record = output as Record<string, unknown>
+  const handled = new Set<string>()
+  appendScalar(lines, record, handled, "command")
+  appendScalar(lines, record, handled, "cmd")
+  appendScalar(lines, record, handled, "path")
+  appendScalar(lines, record, handled, "file")
+  appendScalar(lines, record, handled, "exitCode")
+  appendScalar(lines, record, handled, "status")
+  appendScalar(lines, record, handled, "code")
+  appendScalar(lines, record, handled, "signal")
+
+  const stderr = pickTextField(record, handled, ["stderr", "error", "errorMessage"])
+  if (stderr !== null) {
+    lines.push("")
+    lines.push("stderr:")
+    lines.push(summarizeText(stderr, budget.errorHeadBytes, budget.errorTailBytes, "stderr"))
+  }
+
+  const stdout = pickTextField(record, handled, ["stdout", "output", "content", "result"])
+  if (stdout !== null) {
+    lines.push("")
+    lines.push("stdout:")
+    lines.push(summarizeText(stdout, budget.textHeadBytes, budget.textTailBytes, "stdout"))
+  }
+
+  const metadata = omitKeys(record, handled)
+  if (Object.keys(metadata).length > 0) {
+    lines.push("")
+    lines.push("metadata:")
+    lines.push(summarizeText(safeJson(metadata), budget.metadataBytes, 0, "metadata"))
+  }
+
+  lines.push("</tool-result>")
+  return lines.join("\n")
+}
+
+function appendScalar(lines: string[], record: Record<string, unknown>, handled: Set<string>, key: string): void {
+  if (!(key in record)) return
+  const value = record[key]
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return
+  handled.add(key)
+  lines.push(`${key}: ${String(value)}`)
+}
+
+function pickTextField(record: Record<string, unknown>, handled: Set<string>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    if (!(key in record)) continue
+    const value = record[key]
+    if (value === null || value === undefined) continue
+    handled.add(key)
+    if (typeof value === "string") return value
+    return safeJson(value)
+  }
+  return null
+}
+
+function omitKeys(record: Record<string, unknown>, keys: ReadonlySet<string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(record)) {
+    if (!keys.has(key)) out[key] = value
+  }
+  return out
+}
+
+function summarizeText(text: string, headBytes: number, tailBytes: number, label: string): string {
+  const bytes = Buffer.byteLength(text, "utf8")
+  if (bytes <= headBytes + tailBytes) return text
+  const head = takeStartByBytes(text, headBytes)
+  const tail = tailBytes > 0 ? takeEndByBytes(text, tailBytes) : ""
+  const omittedBytes = Math.max(0, bytes - Buffer.byteLength(head, "utf8") - Buffer.byteLength(tail, "utf8"))
+  const marker = `[${label} omitted ${omittedBytes} bytes from the middle]`
+  return tail.length > 0 ? `${head}\n${marker}\n${tail}` : `${head}\n${marker}`
+}
+
+function takeStartByBytes(text: string, maxBytes: number): string {
+  let bytes = 0
+  let out = ""
+  for (const char of text) {
+    const charBytes = Buffer.byteLength(char, "utf8")
+    if (bytes + charBytes > maxBytes) break
+    bytes += charBytes
+    out += char
+  }
+  return out
+}
+
+function takeEndByBytes(text: string, maxBytes: number): string {
+  let bytes = 0
+  let out = ""
+  const chars = Array.from(text)
+  for (let index = chars.length - 1; index >= 0; index--) {
+    const char = chars[index] ?? ""
+    const charBytes = Buffer.byteLength(char, "utf8")
+    if (bytes + charBytes > maxBytes) break
+    bytes += charBytes
+    out = char + out
+  }
+  return out
 }
 
 function estimateContentBytes(content: unknown): number {
