@@ -7,7 +7,7 @@
  *    Normally the prompt rides on argv, but Linux caps each arg at
  *    MAX_ARG_STRLEN = 32*PAGE_SIZE (128 KiB on 4 KiB pages) which long
  *    sessions used to trip with E2BIG. We now spill oversize prompts to a
- *    temp file and pass cline a short wrapper instructing it to readFile
+ *    temp file and pass cline a short wrapper instructing it to read
  *    that path — the runner handles this automatically (see
  *    prompt-tempfile.ts), so any cline version is effectively unlimited.
  *

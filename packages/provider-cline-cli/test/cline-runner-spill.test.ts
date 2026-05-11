@@ -64,7 +64,7 @@ describe("cline-runner prompt spill", () => {
     const args = Array.from(cap.captured.args!)
     // argv shape: [--json, --yolo, --act, "<prompt>"]
     expect(args).toContain("small prompt")
-    expect(args.some((a) => a.includes("opencode-anycli redirection"))).toBe(false)
+    expect(args.some((a) => a.includes("complete user request"))).toBe(false)
   })
 
   it("spills oversize prompt to a temp file and substitutes a wrapper in argv", async () => {
@@ -81,7 +81,7 @@ describe("cline-runner prompt spill", () => {
     // argv must NOT contain the original prompt anymore.
     expect(args).not.toContain(big)
     // argv must contain the wrapper signature.
-    const wrapperArg = args.find((a) => a.includes("opencode-anycli redirection"))
+    const wrapperArg = args.find((a) => a.includes("complete user request"))
     expect(wrapperArg).toBeDefined()
     // wrapper must reference a file path under our temp dir.
     const match = wrapperArg!.match(/(\S*opencode-anycli-prompts\/prompt-[^\s]+\.txt)/)
@@ -110,7 +110,7 @@ describe("cline-runner prompt spill", () => {
       setTimeout(() => {
         // Inspect temp file BEFORE we emit close — that's the window where
         // cline would actually be reading it.
-        const wrapper = (args ?? []).find((a) => a.includes("opencode-anycli redirection"))
+        const wrapper = (args ?? []).find((a) => a.includes("complete user request"))
         const m = wrapper?.match(/(\S*opencode-anycli-prompts\/prompt-[^\s]+\.txt)/)
         if (m) {
           const path = m[1]!
@@ -263,7 +263,7 @@ describe("cline-runner prompt spill", () => {
 
         setTimeout(() => {
           const argList = Array.from(args ?? [])
-          const wrapper = argList.find((a) => a.includes("opencode-anycli redirection"))
+          const wrapper = argList.find((a) => a.includes("complete user request"))
           if (wrapper) {
             const m = wrapper.match(/(\S*opencode-anycli-prompts\/prompt-[^\s]+\.txt)/)
             if (m) {
@@ -302,7 +302,7 @@ describe("cline-runner prompt spill", () => {
       })
 
       const argList = Array.from(captured.args ?? [])
-      const wrapperArg = argList.find((a) => a.includes("opencode-anycli redirection"))
+      const wrapperArg = argList.find((a) => a.includes("complete user request"))
 
       if (c.expectSpill) {
         expect(wrapperArg, `expected spill (${promptBytes} bytes > ${c.limit})`).toBeDefined()
@@ -335,7 +335,7 @@ describe("cline-runner prompt spill", () => {
       proc.kill = () => true
       proc.stdout = new Readable({ read() {} })
       proc.stderr = new Readable({ read() {} })
-      const wrapper = (args ?? []).find((a) => a.includes("opencode-anycli redirection"))
+      const wrapper = (args ?? []).find((a) => a.includes("complete user request"))
       const m = wrapper?.match(/(\S*opencode-anycli-prompts\/prompt-[^\s]+\.txt)/)
       if (m) capturedPath = m[1]!
       setTimeout(() => {

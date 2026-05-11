@@ -11,6 +11,7 @@
 // that exist in @ai-sdk/provider@^3.0.8.
 
 import { randomUUID } from "node:crypto"
+import { appendFileSync } from "node:fs"
 import type {
   LanguageModelV3,
   LanguageModelV3CallOptions,
@@ -61,6 +62,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
     }
 
     const promptText = flattenPrompt({ prompt: options.prompt as ReadonlyArray<unknown> })
+    logPromptDebug("generate", options.prompt as ReadonlyArray<unknown>, promptText)
     const runner = this.options.mode === "acp" ? runOnceAcp : runOnce
     const result = await runner({
       prompt: promptText,
@@ -101,20 +103,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
     }
 
     const promptText = flattenPrompt({ prompt: options.prompt as ReadonlyArray<unknown> })
-    // Diagnostic: dump the prompt array opencode handed us BEFORE flatten,
-    // so we can tell whether newlines were stripped upstream (in opencode)
-    // or by our flatten (which preserves them by construction). Gated by
-    // env var so production runs incur zero cost.
-    if (process.env["OPENCODE_ANYCLI_PROMPTLOG"]) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const fs = require("node:fs") as typeof import("node:fs")
-        fs.appendFileSync(
-          process.env["OPENCODE_ANYCLI_PROMPTLOG"],
-          JSON.stringify({ ts: Date.now(), promptArray: options.prompt, flattened: promptText }, null, 2) + "\n---\n",
-        )
-      } catch { /* ignore */ }
-    }
+    logPromptDebug("stream", options.prompt as ReadonlyArray<unknown>, promptText)
     const modelId = this.modelId
     const command = this.options.command
     const timeoutMs = this.options.timeoutMs
@@ -237,6 +226,54 @@ export class ClineLanguageModel implements LanguageModelV3 {
 
 function cryptoRandomId(): string {
   return `cline-${randomUUID()}`
+}
+
+function logPromptDebug(mode: "generate" | "stream", prompt: ReadonlyArray<unknown>, flattened: string): void {
+  const path = process.env["OPENCODE_ANYCLI_PROMPTLOG"]
+  if (!path) return
+  try {
+    appendFileSync(
+      path,
+      JSON.stringify(
+        {
+          ts: Date.now(),
+          mode,
+          flattenedBytes: Buffer.byteLength(flattened, "utf8"),
+          messageBreakdown: prompt.map(summarizePromptMessage),
+          promptArray: prompt,
+          flattened,
+        },
+        null,
+        2,
+      ) + "\n---\n",
+      "utf8",
+    )
+  } catch {
+    /* diagnostic logging must never break a model call */
+  }
+}
+
+function summarizePromptMessage(msg: unknown, index: number): Record<string, unknown> {
+  if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
+    return { index, role: "(invalid)", contentBytes: 0 }
+  }
+  const m = msg as { role?: unknown; content?: unknown }
+  const role = typeof m.role === "string" ? m.role : "user"
+  return {
+    index,
+    role,
+    contentBytes: estimateContentBytes(m.content),
+  }
+}
+
+function estimateContentBytes(content: unknown): number {
+  if (typeof content === "string") return Buffer.byteLength(content, "utf8")
+  if (content === null || content === undefined) return 0
+  try {
+    return Buffer.byteLength(JSON.stringify(content), "utf8")
+  } catch {
+    return Buffer.byteLength(String(content), "utf8")
+  }
 }
 
 function toV3Usage(usage: ClineUsage): import("@ai-sdk/provider").LanguageModelV3Usage {

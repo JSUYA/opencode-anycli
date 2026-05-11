@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest"
 import { EventEmitter } from "node:events"
 import { Readable } from "node:stream"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ChildProcessWithoutNullStreams } from "node:child_process"
@@ -631,6 +631,50 @@ describe("ClineLanguageModel", () => {
     const passthrough = new ClineLanguageModel("default", { mode: "passthrough" })
     const fakeOpts = { prompt: [{ role: "user", content: "hi" }] } as unknown as Parameters<typeof passthrough.doStream>[0]
     await expect(passthrough.doStream(fakeOpts)).rejects.toThrow(/Passthrough mode not yet implemented/)
+  })
+
+  it("writes prompt diagnostics for generate and stream calls", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-promptlog-"))
+    const fakeCline = join(dir, "cline")
+    const promptLog = join(dir, "prompt.log")
+    const previous = process.env["OPENCODE_ANYCLI_PROMPTLOG"]
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: 'ok', partial: false }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+
+    try {
+      process.env["OPENCODE_ANYCLI_PROMPTLOG"] = promptLog
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const prompt = [
+        { role: "system", content: "system rule" },
+        { role: "user", content: "user request" },
+      ] as unknown as Parameters<typeof model.doGenerate>[0]["prompt"]
+
+      await model.doGenerate({ prompt } as unknown as Parameters<typeof model.doGenerate>[0])
+      const streamResult = await model.doStream({ prompt } as unknown as Parameters<typeof model.doStream>[0])
+      const reader = streamResult.stream.getReader()
+      while (true) {
+        const { done } = await reader.read()
+        if (done) break
+      }
+
+      const log = readFileSync(promptLog, "utf8")
+      expect(log).toContain('"mode": "generate"')
+      expect(log).toContain('"mode": "stream"')
+      expect(log).toContain('"flattenedBytes"')
+      expect(log).toContain('"messageBreakdown"')
+      expect(log).toContain("[USER]\\nuser request\\n[/USER]")
+    } finally {
+      if (previous === undefined) delete process.env["OPENCODE_ANYCLI_PROMPTLOG"]
+      else process.env["OPENCODE_ANYCLI_PROMPTLOG"] = previous
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

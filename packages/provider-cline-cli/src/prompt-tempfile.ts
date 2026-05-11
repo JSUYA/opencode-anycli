@@ -65,20 +65,15 @@ export async function deletePromptTempFile(path: string): Promise<void> {
 
 /**
  * Wrapper text we send via argv when the real prompt was spilled to a file.
- * Designed to be unambiguous to cline's planner so it (a) reads the exact
- * absolute path with its readFile tool, (b) treats the file's contents as
- * the user request verbatim, and (c) doesn't echo the redirection back.
+ * Designed to be short and generic for older cline builds: ask it to read
+ * the exact absolute path, treat the file's contents as the user request,
+ * and avoid echoing transport details back to the user.
  */
 export function buildPromptFileWrapper(absPath: string): string {
   return [
-    "[opencode-anycli redirection]",
-    "The user's full request is too large for argv and was written to:",
-    "",
+    "Read this file, then follow its contents as the complete user request:",
     `  ${absPath}`,
     "",
-    "Use your readFile tool to read that file in full, then treat its",
-    "contents as the user's complete request — exactly as if the user had",
-    "typed those contents directly here. Do not mention this redirection",
-    "or the file path in your response.",
+    "Do not mention this handoff or the file path.",
   ].join("\n")
 }

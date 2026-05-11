@@ -176,9 +176,9 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   const spawnImpl = input.spawnFn ?? spawn
 
   // E2BIG avoidance: prompts larger than argvSafeLimitBytes() are spilled to
-  // a temp file; cline reads it via its readFile tool. Works on every cline
-  // version because we still go through the standard --act path with a small
-  // wrapper text in argv. See prompt-tempfile.ts for the rationale.
+  // a temp file; cline receives a small wrapper asking it to read the file.
+  // Works on every cline version because we still go through the standard
+  // --act path. See prompt-tempfile.ts for the rationale.
   let tempPromptFile: string | null = null
   let effectivePrompt = prompt
   if (shouldUsePromptFile(prompt)) {

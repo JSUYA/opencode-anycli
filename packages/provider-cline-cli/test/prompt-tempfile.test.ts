@@ -95,10 +95,12 @@ describe("buildPromptFileWrapper", () => {
     expect(out).toContain("/tmp/opencode-anycli-prompts/prompt-abc.txt")
   })
 
-  it("instructs cline to use readFile and not echo the redirection", () => {
+  it("instructs cline to read the file and not echo the handoff", () => {
     const out = buildPromptFileWrapper("/tmp/x.txt")
-    expect(out).toMatch(/readFile/i)
+    expect(out).toMatch(/read this file/i)
+    expect(out).toMatch(/complete user request/i)
     expect(out).toMatch(/do not mention/i)
+    expect(out).not.toMatch(/argv|redirection|opencode-anycli/i)
   })
 
   it("stays small (well under the argv limit)", () => {
