@@ -31,7 +31,7 @@ export interface ClineProviderOptions {
   extraArgs?: string[]
   /** Working directory for the spawned cline process. */
   cwd?: string
-  /** How long to wait for cline to finish before killing it. Default 600_000 ms (10 min). */
+  /** How long to wait for cline to finish before killing it. Default 3_600_000 ms (1 hour). */
   timeoutMs?: number
   /** Environment variables to merge into the spawned process's env. */
   env?: Record<string, string>

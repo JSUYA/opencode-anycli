@@ -20,7 +20,7 @@ The CLI sets `XDG_CONFIG_HOME=$HOME/.config/opencode-anycli` when starting openc
 | `command` | string | `cline` | Path to the cline binary. |
 | `extraArgs` | string array | `[]` | Additional cline arguments. |
 | `cwd` | string | opencode working directory | Optional working directory override. |
-| `timeoutMs` | number | `600000` | Subprocess timeout. |
+| `timeoutMs` | number | `3600000` | Subprocess timeout. |
 | `env` | object | `{}` | Extra environment variables for cline. |
 
 ## Environment Variables

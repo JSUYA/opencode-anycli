@@ -23,7 +23,7 @@ import { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
 import { composeClineHandoff, type ClineHandoffDiagnostics } from "./cline-handoff.js"
 import type { ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
 
-const DEFAULT_TIMEOUT_MS = 600_000
+const DEFAULT_TIMEOUT_MS = 3_600_000
 
 export class ClineLanguageModel implements LanguageModelV3 {
   readonly specificationVersion = "v3"
