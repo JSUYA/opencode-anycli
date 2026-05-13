@@ -477,6 +477,73 @@ describe("runOnce", () => {
     }
   })
 
+  it("extracts cumulative input tokens from cline's # Context Window Usage banner", async () => {
+    // Repro for sr-proxy/GaussO5-CLI: cline emits api_req_started with the
+    // text JSON containing ONLY `request` (no tokensIn/tokensOut) — the
+    // only token signal available is the human-readable banner cline
+    // embeds inside environment_details. We must recover input tokens
+    // from there so opencode's "Context: X tokens Y%" stops reading 0.
+    const embeddedPrompt = JSON.stringify({
+      request:
+        "<task>\nhi\n</task>\n\n<environment_details>\n# Context Window Usage\n16,374 / 256K tokens used (6%)\n\n# Current Mode\nACT MODE\n</environment_details>\n\nLoading...",
+    })
+    const out = [
+      '{"type":"task_started","taskId":"t-srproxy"}',
+      `{"ts":1,"type":"say","say":"api_req_started","text":${JSON.stringify(embeddedPrompt)}}`,
+      '{"type":"say","say":"completion_result","text":"ok"}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage.inputTokens).toBe(16374)
+    expect(result.usage.totalTokens).toBe(16374)
+  })
+
+  it("uses the latest # Context Window Usage banner across multi-iteration runs", async () => {
+    const turn1 = JSON.stringify({
+      request: "<task>...</task><environment_details># Context Window Usage\n100 / 256K tokens used (0%)</environment_details>",
+    })
+    const turn2 = JSON.stringify({
+      request: "<task>...</task><environment_details># Context Window Usage\n18,810 / 256K tokens used (7%)</environment_details>",
+    })
+    const out = [
+      '{"type":"task_started","taskId":"t"}',
+      `{"ts":1,"type":"say","say":"api_req_started","text":${JSON.stringify(turn1)}}`,
+      `{"ts":2,"type":"say","say":"api_req_started","text":${JSON.stringify(turn2)}}`,
+      '{"type":"say","say":"completion_result","text":"ok"}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage.inputTokens).toBe(18810)
+  })
+
+  it("prefers structured tokensIn from api_req_started text over the banner", async () => {
+    // When both are present (openai-codex path), the structured numbers win.
+    const text = JSON.stringify({
+      request:
+        "<task>...</task># Context Window Usage\n9999 / 256K tokens used (3%)\n",
+      tokensIn: 1234,
+      tokensOut: 56,
+    })
+    const out = [
+      '{"type":"task_started","taskId":"t"}',
+      `{"ts":1,"type":"say","say":"api_req_started","text":${JSON.stringify(text)}}`,
+      '{"type":"say","say":"completion_result","text":"ok"}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage.inputTokens).toBe(1234)
+    expect(result.usage.outputTokens).toBe(56)
+  })
+
   it("returns zero usage when api_req_finished is absent (does not fabricate)", async () => {
     const out = ['{"type":"say","say":"text","text":"hi","partial":false}']
     const result = await runOnce({

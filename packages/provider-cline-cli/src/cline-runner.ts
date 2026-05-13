@@ -447,7 +447,18 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       return
     }
     if (isApiReqStarted(ev) || isApiReqFinished(ev)) {
-      maybeUpdateUsage(ev, pickUsage(ev))
+      const structured = pickUsage(ev)
+      if (hasTokenUsage(structured)) {
+        maybeUpdateUsage(ev, structured)
+        return
+      }
+      // Fallback for cline providers (e.g. sr-proxy) that DO NOT populate
+      // tokensIn/tokensOut in api_req_started.text — cline still embeds a
+      // human-readable "# Context Window Usage\nN / M tokens used (P%)"
+      // banner inside environment_details, which is the only place we can
+      // recover the cumulative input-token count for these providers.
+      const ctxUsage = pickContextWindowUsage(pickText(ev))
+      if (ctxUsage !== null) maybeUpdateUsage(ev, ctxUsage)
       return
     }
     // Surface cline's readFile activity as a structured tool-call so opencode's
@@ -582,6 +593,46 @@ function wrapErr(err: unknown, prefix: string): Error {
     return e
   }
   return new Error(`${prefix}: ${String(err)}`)
+}
+
+/**
+ * Cline embeds a human-readable "Context Window Usage" banner inside the
+ * environment_details block that ships in every api_req_started prompt:
+ *
+ *   # Context Window Usage
+ *   16,112 / 256K tokens used (6%)
+ *
+ * Custom cline providers (observed: `sr-proxy`/`GaussO5-CLI`) DO NOT populate
+ * the structured `tokensIn/tokensOut/cacheReads/cost` fields in the event's
+ * text JSON — they only update this banner. cline's own TUI shows tokens
+ * because it reads this banner; opencode-anycli has to do the same to
+ * keep parity.
+ *
+ * The banner reports cumulative INPUT context for THIS turn (history +
+ * system + user). We treat it as inputTokens; output tokens stay unknown
+ * (best-effort: better than reporting 0/0).
+ */
+function pickContextWindowUsage(text: string | null): ClineUsage | null {
+  if (text === null || text.length === 0) return null
+  // cline writes the api_req_started.text field as a JSON-stringified
+  // request blob, so the embedded environment_details newlines arrive
+  // as the literal two characters `\n` (backslash + n) — NOT real
+  // newline characters. We accept both forms so the regex works whether
+  // we are inspecting the raw event text or a post-JSON.parse string.
+  const match = text.match(
+    /# Context Window Usage(?:\s|\\n|\\r)+([\d,]+)\s*\/\s*[\d.,KMkm]+\s*tokens used/,
+  )
+  if (!match) return null
+  const inputTokens = parseInt((match[1] ?? "").replace(/,/g, ""), 10)
+  if (!Number.isFinite(inputTokens) || inputTokens <= 0) return null
+  return finalizeUsage({
+    inputTokens,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 0,
+    totalCost: undefined,
+  })
 }
 
 function pickRunResultUsage(ev: ClineEvent): ClineUsage {
