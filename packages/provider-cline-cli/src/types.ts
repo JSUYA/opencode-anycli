@@ -40,15 +40,43 @@ export interface ClineProviderOptions {
 /**
  * Subset of cline NDJSON event shapes we actively recognize.
  * `unknown` is fine for the rest — we skip those defensively.
+ *
+ * Cline has TWO event schemas in active use (verified against cline 2.18):
+ *
+ *   Legacy (--yolo --act path):
+ *     task_started → say.task → say.api_req_started (text JSON carries
+ *     tokensIn/tokensOut/cacheReads/cacheWrites/cost) → say.completion_result
+ *
+ *   Current (default / plan / non-yolo path):
+ *     hook_event(agent_start, taskId) →
+ *     agent_event(iteration_start) →
+ *     agent_event(content_start, text deltas) →
+ *     agent_event(usage, inputTokens/outputTokens/...) →
+ *     agent_event(content_end, full text) →
+ *     agent_event(iteration_end) →
+ *     hook_event(agent_end) →
+ *     agent_event(done, usage) →
+ *     run_result(usage, aggregateUsage, model, text)
+ *
+ * `ts` is a Unix-ms number in the legacy schema and an ISO-string in the
+ * current schema. The runner normalizes both.
  */
 export type ClineEvent =
-  | { type: "task_started"; taskId?: string; ts?: number }
-  | { type: "say"; say: "text"; text?: string; partial?: boolean; ts?: number }
-  | { type: "say"; say: "reasoning"; text?: string; reasoning?: string; partial?: boolean; ts?: number }
-  | { type: "say"; say: "completion_result"; text?: string; partial?: boolean; ts?: number }
-  | { type: "say"; say: string; text?: string; reasoning?: string; partial?: boolean; commandCompleted?: boolean; ts?: number }
-  | { type: "ask"; ask: string; text?: string; partial?: boolean; ts?: number }
-  | { type: "say"; say: "api_req_started"; text?: string; ts?: number }
+  | { type: "task_started"; taskId?: string; ts?: number | string }
+  | { type: "say"; say: "text"; text?: string; partial?: boolean; ts?: number | string }
+  | { type: "say"; say: "reasoning"; text?: string; reasoning?: string; partial?: boolean; ts?: number | string }
+  | { type: "say"; say: "completion_result"; text?: string; partial?: boolean; ts?: number | string }
+  | {
+      type: "say"
+      say: string
+      text?: string
+      reasoning?: string
+      partial?: boolean
+      commandCompleted?: boolean
+      ts?: number | string
+    }
+  | { type: "ask"; ask: string; text?: string; partial?: boolean; ts?: number | string }
+  | { type: "say"; say: "api_req_started"; text?: string; ts?: number | string }
   | {
       type: "say"
       say: "api_req_finished"
@@ -58,8 +86,60 @@ export type ClineEvent =
       cacheWrites?: number
       cacheReads?: number
       cost?: number
-      ts?: number
+      ts?: number | string
     }
+  | {
+      type: "hook_event"
+      hookEventName?: string
+      agentId?: string
+      taskId?: string
+      parentAgentId?: string | null
+      ts?: number | string
+    }
+  | { type: "agent_event"; event?: AgentEventBody; ts?: number | string }
+  | {
+      type: "run_result"
+      finishReason?: string
+      iterations?: number
+      usage?: AgentUsagePayload
+      aggregateUsage?: AgentUsagePayload
+      durationMs?: number
+      text?: string
+      model?: unknown
+      ts?: number | string
+    }
+  | { type: "error"; message?: string; ts?: number | string }
+  | { type: string; [key: string]: unknown }
+
+/**
+ * Token payload shape used by cline's current schema. Every variant we've
+ * observed populates `inputTokens` / `outputTokens` / `cacheReadTokens` /
+ * `cacheWriteTokens`; the cumulative `total*` fields only appear on
+ * `agent_event.event.type === "usage"` interim snapshots; `totalCost`
+ * appears on the terminal `done` / `run_result` payloads, while interim
+ * snapshots use `cost`.
+ */
+export interface AgentUsagePayload {
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  totalInputTokens?: number
+  totalOutputTokens?: number
+  totalCacheReadTokens?: number
+  totalCacheWriteTokens?: number
+  cost?: number
+  totalCost?: number
+}
+
+export type AgentEventBody =
+  | { type: "iteration_start"; iteration?: number }
+  | { type: "iteration_end"; iteration?: number; hadToolCalls?: boolean; toolCallCount?: number }
+  | { type: "content_start"; contentType?: string; text?: string }
+  | { type: "content_end"; contentType?: string; text?: string }
+  | ({ type: "usage" } & AgentUsagePayload)
+  | { type: "error"; error?: { name?: string; message?: string; stack?: string }; recoverable?: boolean; iteration?: number }
+  | { type: "done"; reason?: string; text?: string; iterations?: number; usage?: AgentUsagePayload }
   | { type: string; [key: string]: unknown }
 
 export interface ClineUsage {

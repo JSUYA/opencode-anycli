@@ -14,11 +14,16 @@ import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import {
+  agentEventBody,
   createNdjsonSplitter,
   parseLine,
+  isAgentEvent,
   isApiReqFinished,
   isApiReqStarted,
+  isErrorEvent,
+  isHookEvent,
   isPartial,
+  isRunResult,
   isTaskStarted,
   pickText,
 } from "./ndjson-parser.js"
@@ -280,6 +285,11 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // the latest snapshot by `ts` instead and use that as the run's usage.
   let usage = emptyUsage()
   let latestUsageTs = -1
+  // `run_result` / `agent_event.done` are the authoritative terminal usage
+  // values in cline's current schema. Once one of them lands we stop
+  // letting interim snapshots overwrite the picked value — otherwise an
+  // unrelated late event with stale numbers could clobber the final total.
+  let terminalUsageSeen = false
   let parseErrors = 0
 
   function emitTextIfNew(channel: string, text: string) {
@@ -320,13 +330,14 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     }
   }
 
-  function maybeUpdateUsage(ev: ClineEvent, next: ClineUsage) {
+  function maybeUpdateUsage(ev: ClineEvent, next: ClineUsage, opts: { terminal?: boolean } = {}) {
     if (!hasTokenUsage(next)) return
-    const ts = (ev as { ts?: unknown }).ts
-    const tsNum = typeof ts === "number" ? ts : latestUsageTs + 1
-    if (tsNum < latestUsageTs) return
+    if (terminalUsageSeen && !opts.terminal) return
+    const tsNum = pickTsNumber(ev) ?? latestUsageTs + 1
+    if (!opts.terminal && tsNum < latestUsageTs) return
     latestUsageTs = tsNum
     usage = next
+    if (opts.terminal) terminalUsageSeen = true
   }
 
   // Track readFile tool-calls we've already surfaced so partial→final
@@ -336,6 +347,87 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   function handleEvent(ev: ClineEvent) {
     if (isTaskStarted(ev)) {
       taskId = pickTaskId(ev) ?? taskId
+      return
+    }
+    // Current-schema lifecycle envelope. Carries the legacy-style numeric
+    // taskId on `agent_start`, which our persisted-file fallback uses.
+    if (isHookEvent(ev)) {
+      const hookTaskId = (ev as { taskId?: unknown }).taskId
+      if (typeof hookTaskId === "string" && hookTaskId.length > 0) taskId = hookTaskId
+      return
+    }
+    // Terminal events from the current schema — `run_result` is the last
+    // line cline emits, `agent_event.done` arrives one event earlier.
+    // Either way the embedded usage is the authoritative final total.
+    if (isRunResult(ev)) {
+      maybeUpdateUsage(ev, pickRunResultUsage(ev), { terminal: true })
+      const text = pickStringField(ev, "text")
+      const finishReason = pickStringField(ev, "finishReason")
+      // run_result.text is the final assistant string. For the current
+      // schema this is the ONLY place a clean final answer lands when
+      // cline streamed via agent_event.content_start chunks but never
+      // emitted a legacy say.text / completion_result. Only surface it
+      // if nothing has been emitted on the assistant channel yet, to
+      // avoid duplicating with the chunked content_start stream above.
+      if (text && finishReason !== "error" && !emittedByChannel.has("assistant")) {
+        emitTextIfNew("assistant", text)
+      }
+      return
+    }
+    if (isAgentEvent(ev)) {
+      const body = agentEventBody(ev)
+      if (body === null) return
+      switch (body.type) {
+        case "content_start": {
+          // Each chunk is a discrete text delta — cline already split them
+          // up. We DO NOT mirror to emitTextIfNew's prefix-tracking because
+          // these chunks aren't cumulative.
+          const contentType = (body as { contentType?: unknown }).contentType
+          if (contentType !== undefined && contentType !== "text") return
+          const text = (body as { text?: unknown }).text
+          if (typeof text === "string" && text.length > 0) {
+            enqueue({ type: "text-delta", delta: text })
+            // Track that we've already streamed the assistant channel so
+            // a duplicate full-text `run_result.text` doesn't re-emit it.
+            emittedByChannel.set("assistant", (emittedByChannel.get("assistant") ?? "") + text)
+          }
+          return
+        }
+        case "content_end":
+          // `content_end` carries the FULL concatenated text — we already
+          // streamed each chunk via `content_start`, so dropping it avoids
+          // duplication. (Unlike say.text→completion_result in the legacy
+          // schema, this end event is not an extension of the deltas.)
+          return
+        case "usage": {
+          // Interim cumulative snapshot. Use totalInputTokens etc. when
+          // present so consecutive iterations show the running total, not
+          // the per-iteration delta.
+          maybeUpdateUsage(ev, normalizeAgentUsage(body))
+          return
+        }
+        case "done": {
+          const u = normalizeAgentUsage((body as { usage?: unknown }).usage)
+          maybeUpdateUsage(ev, u, { terminal: true })
+          return
+        }
+        case "error": {
+          const errBody = (body as { error?: { message?: unknown; name?: unknown } }).error
+          const message = (typeof errBody?.message === "string" && errBody.message) ||
+            (typeof errBody?.name === "string" && errBody.name) ||
+            "cline agent error"
+          enqueue({ type: "error", error: new Error(String(message)) })
+          return
+        }
+        default:
+          // iteration_start / iteration_end / other lifecycle markers —
+          // informational. Drop.
+          return
+      }
+    }
+    if (isErrorEvent(ev)) {
+      const message = pickStringField(ev, "message") ?? "cline reported an error"
+      enqueue({ type: "error", error: new Error(message) })
       return
     }
     if (isApiReqStarted(ev) || isApiReqFinished(ev)) {
@@ -472,6 +564,64 @@ function wrapErr(err: unknown, prefix: string): Error {
     return e
   }
   return new Error(`${prefix}: ${String(err)}`)
+}
+
+function pickRunResultUsage(ev: ClineEvent): ClineUsage {
+  const usage = (ev as { usage?: unknown }).usage
+  const aggregate = (ev as { aggregateUsage?: unknown }).aggregateUsage
+  const primary = normalizeAgentUsage(usage)
+  if (hasTokenUsage(primary)) return primary
+  return normalizeAgentUsage(aggregate)
+}
+
+/**
+ * Convert cline's current-schema usage payload (with inputTokens /
+ * outputTokens / cacheReadTokens / cacheWriteTokens / cost|totalCost,
+ * and optional cumulative total* variants) into our internal ClineUsage.
+ *
+ * Prefer the cumulative `total*` fields when present (interim
+ * agent_event.usage snapshots include them); fall back to the per-snapshot
+ * fields used by `agent_event.done.usage` and `run_result.usage`.
+ */
+function normalizeAgentUsage(raw: unknown): ClineUsage {
+  if (!isRecord(raw)) return emptyUsage()
+  const inputTokens =
+    pickNumber(raw, ["totalInputTokens"]) ?? pickNumber(raw, ["inputTokens"]) ?? 0
+  const outputTokens =
+    pickNumber(raw, ["totalOutputTokens"]) ?? pickNumber(raw, ["outputTokens"]) ?? 0
+  const cacheReadTokens =
+    pickNumber(raw, ["totalCacheReadTokens"]) ?? pickNumber(raw, ["cacheReadTokens"]) ?? 0
+  const cacheWriteTokens =
+    pickNumber(raw, ["totalCacheWriteTokens"]) ?? pickNumber(raw, ["cacheWriteTokens"]) ?? 0
+  const totalCost = pickNumber(raw, ["totalCost", "cost"])
+  return finalizeUsage({
+    inputTokens,
+    outputTokens,
+    cacheWriteTokens,
+    cacheReadTokens,
+    totalTokens: 0,
+    totalCost,
+  })
+}
+
+/**
+ * Cline's two schemas timestamp events differently — legacy fires Unix-ms
+ * numbers, current fires ISO-8601 strings. We need a comparable number to
+ * decide whether an interim usage snapshot should win over the previous one.
+ */
+function pickTsNumber(ev: ClineEvent): number | null {
+  const ts = (ev as { ts?: unknown }).ts
+  if (typeof ts === "number" && Number.isFinite(ts)) return ts
+  if (typeof ts === "string" && ts.length > 0) {
+    const parsed = Date.parse(ts)
+    if (!Number.isNaN(parsed)) return parsed
+  }
+  return null
+}
+
+function pickStringField(ev: ClineEvent, key: string): string | null {
+  const value = (ev as Record<string, unknown>)[key]
+  return typeof value === "string" && value.length > 0 ? value : null
 }
 
 function emptyUsage(): ClineUsage {

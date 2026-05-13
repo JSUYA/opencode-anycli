@@ -340,6 +340,143 @@ describe("runOnce", () => {
     }
   })
 
+  it("harvests usage from cline's current-schema run_result event", async () => {
+    // Cline 2.18 emits a new terminal `run_result` event whose `usage`
+    // object carries the final cumulative tokens. Older code only looked
+    // at legacy `say.api_req_*` events and missed every token.
+    const out = [
+      '{"ts":"2026-05-13T08:44:50.988Z","type":"hook_event","hookEventName":"agent_start","taskId":"conv_x"}',
+      '{"ts":"2026-05-13T08:44:50.989Z","type":"agent_event","event":{"type":"iteration_start","iteration":1}}',
+      '{"ts":"2026-05-13T08:44:55.330Z","type":"agent_event","event":{"type":"content_start","contentType":"text","text":"2 + 2 = 4"}}',
+      '{"ts":"2026-05-13T08:44:55.548Z","type":"agent_event","event":{"type":"usage","inputTokens":2843,"outputTokens":11,"cacheReadTokens":0,"cacheWriteTokens":0,"cost":0,"totalInputTokens":2843,"totalOutputTokens":11,"totalCacheReadTokens":0,"totalCacheWriteTokens":0,"totalCost":0}}',
+      '{"ts":"2026-05-13T08:44:55.549Z","type":"agent_event","event":{"type":"content_end","contentType":"text","text":"2 + 2 = 4"}}',
+      '{"ts":"2026-05-13T08:44:55.552Z","type":"agent_event","event":{"type":"done","reason":"completed","text":"2 + 2 = 4","iterations":1,"usage":{"inputTokens":2843,"outputTokens":11,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0}}}',
+      '{"ts":"2026-05-13T08:44:55.593Z","type":"run_result","finishReason":"completed","iterations":1,"usage":{"inputTokens":2843,"outputTokens":11,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0},"aggregateUsage":{"inputTokens":2843,"outputTokens":11,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0},"durationMs":4566,"text":"2 + 2 = 4"}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toBe("2 + 2 = 4")
+    expect(result.usage).toEqual({
+      inputTokens: 2843,
+      outputTokens: 11,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+      totalTokens: 2854,
+      totalCost: 0,
+    })
+  })
+
+  it("falls back to run_result aggregateUsage when primary usage is empty", async () => {
+    // Defensive: if cline ever ships a build where `usage` is omitted but
+    // `aggregateUsage` is populated, we should still capture the totals.
+    const out = [
+      '{"ts":"2026-05-13T08:44:55.593Z","type":"run_result","finishReason":"completed","usage":{},"aggregateUsage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":20,"cacheWriteTokens":0,"totalCost":0.01},"text":"hi"}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage.inputTokens).toBe(100)
+    expect(result.usage.outputTokens).toBe(50)
+    expect(result.usage.cacheReadTokens).toBe(20)
+    expect(result.usage.totalCost).toBe(0.01)
+  })
+
+  it("prefers terminal run_result usage over a later interim usage event", async () => {
+    // Defensive: an out-of-order interim agent_event.usage MUST NOT clobber
+    // the authoritative terminal usage. Without this guard, a late
+    // diagnostic snapshot in some cline builds would zero the totals.
+    const out = [
+      '{"ts":"2026-05-13T08:44:55.593Z","type":"run_result","finishReason":"completed","usage":{"inputTokens":2843,"outputTokens":11,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0.05},"text":"ok"}',
+      '{"ts":"2026-05-13T08:44:55.999Z","type":"agent_event","event":{"type":"usage","inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"totalInputTokens":0,"totalOutputTokens":0,"totalCacheReadTokens":0,"totalCacheWriteTokens":0,"totalCost":0}}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.usage.inputTokens).toBe(2843)
+    expect(result.usage.outputTokens).toBe(11)
+    expect(result.usage.totalCost).toBe(0.05)
+  })
+
+  it("captures the agent_event.content_start text deltas as the final answer", async () => {
+    const out = [
+      '{"ts":"2026-05-13T08:44:55.300Z","type":"agent_event","event":{"type":"iteration_start","iteration":1}}',
+      '{"ts":"2026-05-13T08:44:55.330Z","type":"agent_event","event":{"type":"content_start","contentType":"text","text":"Hello"}}',
+      '{"ts":"2026-05-13T08:44:55.331Z","type":"agent_event","event":{"type":"content_start","contentType":"text","text":", world"}}',
+      '{"ts":"2026-05-13T08:44:55.332Z","type":"agent_event","event":{"type":"content_end","contentType":"text","text":"Hello, world"}}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toBe("Hello, world")
+  })
+
+  it("rejects when cline emits a top-level error event before exit", async () => {
+    const out = [
+      '{"ts":"2026-05-13T08:44:25.268Z","type":"error","message":"Our servers are currently overloaded. Please try again later."}',
+    ]
+    await expect(
+      runOnce({
+        prompt: "ignored",
+        options: { command: "cline", timeoutMs: 5000 },
+        spawnFn: fakeSpawn(out),
+      }),
+    ).rejects.toThrow(/overloaded/)
+  })
+
+  it("rejects when agent_event surfaces an error sub-event", async () => {
+    const out = [
+      '{"ts":"2026-05-13T08:44:25.268Z","type":"agent_event","event":{"type":"error","error":{"name":"Error","message":"upstream timeout"},"recoverable":false,"iteration":1}}',
+    ]
+    await expect(
+      runOnce({
+        prompt: "ignored",
+        options: { command: "cline", timeoutMs: 5000 },
+        spawnFn: fakeSpawn(out),
+      }),
+    ).rejects.toThrow(/upstream timeout/)
+  })
+
+  it("uses hook_event taskId for persisted-file fallback (current schema)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opencode-anycli-test-"))
+    try {
+      const taskDir = join(home, ".cline", "data", "tasks", "task-hook")
+      mkdirSync(taskDir, { recursive: true })
+      writeFileSync(
+        join(taskDir, "ui_messages.json"),
+        JSON.stringify([
+          {
+            type: "say",
+            say: "api_req_started",
+            text: JSON.stringify({ tokensIn: 77, tokensOut: 9 }),
+          },
+        ]),
+      )
+      const out = [
+        '{"ts":"2026-05-13T08:44:50.988Z","type":"hook_event","hookEventName":"agent_start","taskId":"task-hook"}',
+        '{"ts":"2026-05-13T08:44:50.989Z","type":"agent_event","event":{"type":"iteration_start","iteration":1}}',
+        '{"ts":"2026-05-13T08:44:55.330Z","type":"agent_event","event":{"type":"content_start","contentType":"text","text":"ok"}}',
+      ]
+      const result = await runOnce({
+        prompt: "ignored",
+        options: { command: "cline", timeoutMs: 5000, env: { HOME: home } },
+        spawnFn: fakeSpawn(out),
+      })
+      expect(result.usage.inputTokens).toBe(77)
+      expect(result.usage.outputTokens).toBe(9)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   it("returns zero usage when api_req_finished is absent (does not fabricate)", async () => {
     const out = ['{"type":"say","say":"text","text":"hi","partial":false}']
     const result = await runOnce({

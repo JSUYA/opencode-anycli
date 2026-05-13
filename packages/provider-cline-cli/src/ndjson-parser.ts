@@ -6,7 +6,7 @@
 //
 // We deliberately use `unknown` instead of `any` and validate with hand-rolled type guards.
 
-import type { ClineEvent } from "./types.js"
+import type { AgentEventBody, ClineEvent } from "./types.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
 
@@ -99,6 +99,36 @@ export function isApiReqStarted(e: ClineEvent): e is { type: "say"; say: "api_re
 
 export function isTaskStarted(e: ClineEvent): boolean {
   return e.type === "task_started"
+}
+
+/** Current-schema lifecycle event from cline's plugin hook bus. */
+export function isHookEvent(e: ClineEvent): e is { type: "hook_event"; hookEventName?: string; taskId?: string } {
+  return e.type === "hook_event"
+}
+
+/** Current-schema event envelope; sub-shape lives under `event`. */
+export function isAgentEvent(e: ClineEvent): e is { type: "agent_event"; event?: AgentEventBody } {
+  return e.type === "agent_event"
+}
+
+/** Current-schema terminal event carrying final/aggregate usage. */
+export function isRunResult(e: ClineEvent): boolean {
+  return e.type === "run_result"
+}
+
+/** Top-level cline error event. */
+export function isErrorEvent(e: ClineEvent): e is { type: "error"; message?: string } {
+  return e.type === "error"
+}
+
+/** Pull the sub-event body out of an `agent_event` envelope, if present. */
+export function agentEventBody(e: ClineEvent): AgentEventBody | null {
+  if (e.type !== "agent_event") return null
+  const body = (e as { event?: unknown }).event
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return null
+  const inner = body as Record<string, unknown>
+  if (typeof inner["type"] !== "string") return null
+  return body as AgentEventBody
 }
 
 /** Get the `text` field if it's a non-empty string. */
