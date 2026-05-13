@@ -498,7 +498,10 @@ describe("runOnce", () => {
       spawnFn: fakeSpawn(out),
     })
     expect(result.usage.inputTokens).toBe(16374)
-    expect(result.usage.totalTokens).toBe(16374)
+    // outputTokens may be a small positive estimate derived from streamed
+    // text length (sr-proxy never reports it). Total = input + estimate.
+    expect(result.usage.totalTokens).toBeGreaterThanOrEqual(16374)
+    expect(result.usage.totalTokens).toBeLessThan(16400)
   })
 
   it("uses the latest # Context Window Usage banner across multi-iteration runs", async () => {

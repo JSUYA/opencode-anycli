@@ -292,6 +292,12 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // `completion_result` that duplicates it. We emit only the new tail relative
   // to everything already streamed, so consumers get a single coherent stream.
   const emittedByChannel = new Map<string, string>()
+  // Total characters streamed on the assistant channel. Used as a coarse
+  // fallback to estimate output tokens when cline's provider (e.g. sr-proxy)
+  // never reports them in any structured way. ~3 chars/token approximates
+  // Korean/English mixed content well enough to give opencode a non-zero
+  // signal for its "Context X tokens" panel.
+  let assistantCharCount = 0
   let taskId: string | null = null
   // Each api_req_started / api_req_finished entry is a snapshot of the
   // SAME conversation's tokens after one API call. Some cline configs emit
@@ -317,6 +323,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       if (delta.length > 0) {
         enqueue({ type: "text-delta", delta })
         emittedByChannel.set(channel, text)
+        if (channel === "assistant") assistantCharCount += delta.length
       }
       return
     }
@@ -326,6 +333,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     // would risk double-emission if the same prefix arrives again.
     enqueue({ type: "text-delta", delta: text })
     emittedByChannel.set(channel, text)
+    if (channel === "assistant") assistantCharCount += text.length
   }
 
   const splitter = createNdjsonSplitter()
@@ -406,6 +414,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
             // Track that we've already streamed the assistant channel so
             // a duplicate full-text `run_result.text` doesn't re-emit it.
             emittedByChannel.set("assistant", (emittedByChannel.get("assistant") ?? "") + text)
+            assistantCharCount += text.length
           }
           return
         }
@@ -559,6 +568,16 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       // when persisted and streaming disagreed.
       const persistedUsage = taskId === null ? null : readPersistedTaskUsage(taskId, options)
       if (persistedUsage !== null && hasTokenUsage(persistedUsage)) usage = persistedUsage
+      // Last-resort output estimate. When cline's provider never reports
+      // output tokens (sr-proxy etc.) but we DID see input from the
+      // context-window banner, opencode's TUI still wants a non-zero
+      // output count for the context panel to advance. Estimate from
+      // total assistant chars at ~3 chars/token (Korean/English mix).
+      // Only fills in when output is zero AND we have streamed output.
+      if (usage.outputTokens === 0 && assistantCharCount > 0 && usage.inputTokens > 0) {
+        const estimated = Math.max(1, Math.round(assistantCharCount / 3))
+        usage = finalizeUsage({ ...usage, outputTokens: estimated })
+      }
       enqueue({ type: "finish", usage, parseErrors })
     }
     done = true

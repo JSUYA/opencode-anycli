@@ -272,16 +272,26 @@ function toV3Usage(usage: ClineUsage): import("@ai-sdk/provider").LanguageModelV
   if (usage.cacheReadTokens > 0) raw["cacheReads"] = usage.cacheReadTokens
   if (usage.totalCost !== undefined) raw["cost"] = usage.totalCost
 
+  // When ANY token signal is present we report concrete numbers (0 for the
+  // missing axis) instead of `undefined`. opencode's session aggregator
+  // tolerates 0 fine, but some TUI display paths gate on the field being
+  // a *number* and silently render 0 when the whole usage object looks
+  // empty — concrete zeros make sure the panel advances.
+  const hasAnySignal =
+    usage.inputTokens > 0 ||
+    usage.outputTokens > 0 ||
+    usage.cacheReadTokens > 0 ||
+    usage.cacheWriteTokens > 0
   const result: import("@ai-sdk/provider").LanguageModelV3Usage = {
     inputTokens: {
-      total: inputTotal || undefined,
-      noCache: usage.inputTokens || undefined,
-      cacheRead: usage.cacheReadTokens || undefined,
-      cacheWrite: usage.cacheWriteTokens || undefined,
+      total: hasAnySignal ? inputTotal : undefined,
+      noCache: hasAnySignal ? usage.inputTokens : undefined,
+      cacheRead: hasAnySignal ? usage.cacheReadTokens : undefined,
+      cacheWrite: hasAnySignal ? usage.cacheWriteTokens : undefined,
     },
     outputTokens: {
-      total: usage.outputTokens || undefined,
-      text: usage.outputTokens || undefined,
+      total: hasAnySignal ? usage.outputTokens : undefined,
+      text: hasAnySignal ? usage.outputTokens : undefined,
       reasoning: undefined,
     },
   }
