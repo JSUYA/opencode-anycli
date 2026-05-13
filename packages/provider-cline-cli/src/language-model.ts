@@ -287,5 +287,30 @@ function toV3Usage(usage: ClineUsage): import("@ai-sdk/provider").LanguageModelV
   }
 
   if (Object.keys(raw).length > 0) result.raw = raw
+  logUsageDebug(usage, result)
   return result
+}
+
+/**
+ * Optional usage diagnostic dump.
+ *
+ * Set OPENCODE_ANYCLI_USAGELOG=/path/to/log to record every (raw → v3) usage
+ * mapping the provider returns. Useful for diagnosing "context shows 0
+ * tokens" issues end-to-end without instrumenting opencode itself.
+ */
+function logUsageDebug(
+  internal: ClineUsage,
+  v3: import("@ai-sdk/provider").LanguageModelV3Usage,
+): void {
+  const path = process.env["OPENCODE_ANYCLI_USAGELOG"]
+  if (!path) return
+  try {
+    appendFileSync(
+      path,
+      JSON.stringify({ ts: Date.now(), internal, v3 }) + "\n",
+      "utf8",
+    )
+  } catch {
+    /* diagnostic logging must never break a model call */
+  }
 }
