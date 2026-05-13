@@ -10,7 +10,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { existsSync, readFileSync } from "node:fs"
+import { appendFileSync, existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import {
@@ -36,6 +36,22 @@ import {
 import type { ClineEvent, ClineUsage, RunResult } from "./types.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
+
+/**
+ * Append every raw NDJSON line cline emits to this path. Used to debug
+ * "tokens not collected" reports — we capture the unparsed stream so we
+ * can diff it against our event guards offline.
+ */
+const NDJSON_LOG = process.env["OPENCODE_ANYCLI_CLINE_NDJSON_LOG"] ?? null
+
+function appendNdjsonLog(line: string): void {
+  if (NDJSON_LOG === null) return
+  try {
+    appendFileSync(NDJSON_LOG, line + "\n", "utf8")
+  } catch {
+    /* diagnostic logging must never break a model call */
+  }
+}
 
 const VISIBLE_SAY_TEXT_KINDS = new Set([
   "text",
@@ -473,6 +489,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
 
   child.stdout.on("data", (chunk: string) => {
     for (const line of splitter.push(chunk)) {
+      appendNdjsonLog(line)
       const ev = parseLine(line)
       if (ev === null) {
         parseErrors++
@@ -499,6 +516,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     cleanupTempPromptFile()
     // Flush any trailing line.
     for (const line of splitter.flush()) {
+      appendNdjsonLog(line)
       const ev = parseLine(line)
       if (ev === null) {
         parseErrors++
