@@ -93,6 +93,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
         cline: {
           parseErrors: result.parseErrors,
           modelLabel: this.modelId,
+          ...(result.contextMax !== undefined ? { contextMax: result.contextMax } : {}),
         },
       },
     }

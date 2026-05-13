@@ -158,4 +158,12 @@ export interface RunResult {
   usage: ClineUsage
   /** Number of NDJSON lines that failed to parse — useful for diagnostics. */
   parseErrors: number
+  /**
+   * Context-window size cline reported in the "X / Y tokens used" banner
+   * during this run, if observed. Lets the language-model layer expose
+   * the real upstream limit via providerMetadata so wrappers can render
+   * an accurate `%` even when the static config disagrees with cline's
+   * actual model.
+   */
+  contextMax?: number
 }

@@ -123,7 +123,7 @@ export type StreamEvent =
       result: Record<string, unknown>
       isError?: boolean
     }
-  | { type: "finish"; usage: RunResult["usage"]; parseErrors: number }
+  | { type: "finish"; usage: RunResult["usage"]; parseErrors: number; contextMax?: number }
   | { type: "error"; error: Error }
 
 /**
@@ -153,6 +153,7 @@ export async function runOnce(input: RunInput): Promise<RunResult> {
   let finalText = ""
   let usage = emptyUsage()
   let parseErrors = 0
+  let contextMax: number | undefined
 
   for await (const ev of runStreamInternal(input)) {
     if (ev.type === "text-delta") {
@@ -166,12 +167,15 @@ export async function runOnce(input: RunInput): Promise<RunResult> {
     } else if (ev.type === "finish") {
       usage = ev.usage
       parseErrors = ev.parseErrors
+      contextMax = ev.contextMax
     } else if (ev.type === "error") {
       throw ev.error
     }
   }
 
-  return { text: finalText, usage, parseErrors }
+  const result: RunResult = { text: finalText, usage, parseErrors }
+  if (contextMax !== undefined) result.contextMax = contextMax
+  return result
 }
 
 function renderToolCallAsText(ev: { toolName: string; input: Record<string, unknown> }): string | null {
@@ -312,6 +316,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // letting interim snapshots overwrite the picked value — otherwise an
   // unrelated late event with stale numbers could clobber the final total.
   let terminalUsageSeen = false
+  let contextMax: number | undefined
   let parseErrors = 0
 
   function emitTextIfNew(channel: string, text: string) {
@@ -466,8 +471,21 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       // human-readable "# Context Window Usage\nN / M tokens used (P%)"
       // banner inside environment_details, which is the only place we can
       // recover the cumulative input-token count for these providers.
-      const ctxUsage = pickContextWindowUsage(pickText(ev))
-      if (ctxUsage !== null) maybeUpdateUsage(ev, ctxUsage)
+      const banner = parseContextWindowBanner(pickText(ev))
+      if (banner !== null) {
+        if (banner.max !== undefined && banner.max > 0) contextMax = banner.max
+        maybeUpdateUsage(
+          ev,
+          finalizeUsage({
+            inputTokens: banner.used,
+            outputTokens: 0,
+            cacheWriteTokens: 0,
+            cacheReadTokens: 0,
+            totalTokens: 0,
+            totalCost: undefined,
+          }),
+        )
+      }
       return
     }
     // Surface cline's readFile activity as a structured tool-call so opencode's
@@ -578,7 +596,10 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
         const estimated = Math.max(1, Math.round(assistantCharCount / 3))
         usage = finalizeUsage({ ...usage, outputTokens: estimated })
       }
-      enqueue({ type: "finish", usage, parseErrors })
+      const finishEv: StreamEvent = contextMax !== undefined
+        ? { type: "finish", usage, parseErrors, contextMax }
+        : { type: "finish", usage, parseErrors }
+      enqueue(finishEv)
     }
     done = true
     if (resolveNext) {
@@ -630,8 +651,15 @@ function wrapErr(err: unknown, prefix: string): Error {
  * The banner reports cumulative INPUT context for THIS turn (history +
  * system + user). We treat it as inputTokens; output tokens stay unknown
  * (best-effort: better than reporting 0/0).
+ *
+ * Parse cline's "Context Window Usage" banner. Returns the used token count
+ * AND the max — the max is exposed via providerMetadata so opencode (or
+ * tooling that wraps it) can render an accurate `%` even when the static
+ * config disagrees with cline's actual upstream model.
  */
-function pickContextWindowUsage(text: string | null): ClineUsage | null {
+export function parseContextWindowBanner(
+  text: string | null,
+): { used: number; max: number | undefined } | null {
   if (text === null || text.length === 0) return null
   // cline writes the api_req_started.text field as a JSON-stringified
   // request blob, so the embedded environment_details newlines arrive
@@ -639,19 +667,25 @@ function pickContextWindowUsage(text: string | null): ClineUsage | null {
   // newline characters. We accept both forms so the regex works whether
   // we are inspecting the raw event text or a post-JSON.parse string.
   const match = text.match(
-    /# Context Window Usage(?:\s|\\n|\\r)+([\d,]+)\s*\/\s*[\d.,KMkm]+\s*tokens used/,
+    /# Context Window Usage(?:\s|\\n|\\r)+([\d,]+)\s*\/\s*([\d.,]+\s*[KMkm]?)\s*tokens used/,
   )
   if (!match) return null
-  const inputTokens = parseInt((match[1] ?? "").replace(/,/g, ""), 10)
-  if (!Number.isFinite(inputTokens) || inputTokens <= 0) return null
-  return finalizeUsage({
-    inputTokens,
-    outputTokens: 0,
-    cacheWriteTokens: 0,
-    cacheReadTokens: 0,
-    totalTokens: 0,
-    totalCost: undefined,
-  })
+  const used = parseInt((match[1] ?? "").replace(/,/g, ""), 10)
+  if (!Number.isFinite(used) || used <= 0) return null
+  const max = parseTokenSizeSuffix(match[2] ?? "")
+  return { used, max: max ?? undefined }
+}
+
+/** "256K" → 256000, "1M" → 1_000_000, "128000" → 128000. */
+function parseTokenSizeSuffix(s: string): number | null {
+  const m = s.trim().replace(/,/g, "").match(/^([\d.]+)\s*([KMkm])?$/)
+  if (!m) return null
+  const num = parseFloat(m[1] ?? "")
+  if (!Number.isFinite(num) || num <= 0) return null
+  const suffix = (m[2] ?? "").toUpperCase()
+  if (suffix === "K") return Math.round(num * 1000)
+  if (suffix === "M") return Math.round(num * 1_000_000)
+  return Math.round(num)
 }
 
 function pickRunResultUsage(ev: ClineEvent): ClineUsage {

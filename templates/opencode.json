@@ -9,7 +9,7 @@
       "models": {
         "default": {
           "name": "Cline default (auto-detect from cline config)",
-          "limit": { "context": 128000, "output": 8192 }
+          "limit": { "context": 256000, "output": 8192 }
         }
       },
       "options": {
