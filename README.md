@@ -75,17 +75,15 @@ disposable environment. Files created during that session may be root-owned.
 
 ## TUI defaults
 
-OpenCode-AnyCLI installs a small TUI config for predictable terminal behavior:
+OpenCode-AnyCLI installs a small TUI config. Enter and Shift+Enter follow
+opencode's upstream defaults (Enter submits, Shift+Enter inserts a newline
+when the terminal reports the Shift modifier). The only override shipped is:
 
 | Key | Action |
 |---|---|
-| Enter | Insert newline |
-| Alt+Enter | Submit prompt |
-| Ctrl+Enter | Submit prompt when supported by the terminal |
-| Ctrl+J | Submit prompt fallback |
 | Ctrl+C | Open an exit confirmation dialog |
 
-To customize these bindings, edit:
+To customize bindings, edit:
 
 ```text
 ~/.config/opencode-anycli/opencode/tui.json

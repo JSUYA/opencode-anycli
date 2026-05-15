@@ -214,17 +214,12 @@ fi
 ok "Node v$NODE_VER"
 
 # ─── 3. opencode binary (bundled runtime — auto-installed on demand) ─────────
-# Why a minimum version check lives here: opencode-anycli ships a tui.json
-# (templates/tui.json) and a TUI plugin (packages/tui-plugin-exit-confirm)
-# that both target opencode ≥ 1.14:
-#   - Keybind names `prompt_submit`, `input_submit`, `input_newline` were
-#     introduced in 1.14 alongside the strict tui.json schema
-#     (`additionalProperties: false`). On older opencode these names are
-#     unknown and the whole keybind override block is silently dropped, so
-#     Ctrl+C falls back to default app_exit and Enter falls back to submit.
-#   - The plugin intercepts Ctrl+C via `api.renderer.keyInput.on("keypress")`,
-#     an API that only exists in 1.14+. On older builds the plugin loads
-#     but the guard at the top short-circuits and no handler is attached.
+# Why a minimum version check lives here: opencode-anycli ships a TUI plugin
+# (packages/tui-plugin-exit-confirm) that intercepts Ctrl+C via
+# `api.renderer.keyInput.on("keypress")`, an API that only exists in 1.14+.
+# On older builds the plugin loads but the guard at the top short-circuits
+# and no handler is attached, so Ctrl+C falls back to opencode's default
+# `app_exit` behavior with no confirmation dialog.
 # Additionally we have a concrete report of 1.14.41 failing to load the
 # plugin even though dist/tui.json/file:// URL are all valid, with the fix
 # being a bump to 1.14.48 — so the floor here is the highest known-good
