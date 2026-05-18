@@ -81,7 +81,7 @@ flowchart TB
     LoopGuard -- prior dispatch found --> Runner
     LoopGuard -- no prior dispatch --> Bypass
     Bypass --> Opencode
-    Opencode -. SKILL.md load + resume .-> Handoff
+    Opencode -. "SKILL.md" load + resume .-> Handoff
 
     Runner --> Cline
     Cline -- NDJSON --> Runner
