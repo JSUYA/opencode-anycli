@@ -21,6 +21,15 @@ import type {
 import { runOnce, runStream } from "./cline-runner.js"
 import { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
 import { composeClineHandoff, type ClineHandoffDiagnostics } from "./cline-handoff.js"
+import {
+  OpencodeCallParser,
+  SUPPORTED_OPENCODE_CALL_TOOLS,
+  detectSkillNaturalLanguageInHandoff,
+  detectSkillSlashCommand,
+  isSkillAlreadyDispatchedInHandoff,
+  type OpencodeCall,
+  type ProtocolToolDescriptor,
+} from "./opencode-call-parser.js"
 import type { ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
 
 const DEFAULT_TIMEOUT_MS = 3_600_000
@@ -61,9 +70,44 @@ export class ClineLanguageModel implements LanguageModelV3 {
       throw new Error("Passthrough mode not yet implemented — see docs/provider-modes.md")
     }
 
-    const handoff = composeClineHandoff({ prompt: options.prompt as ReadonlyArray<unknown> })
+    const tools = extractTools(options)
+    const handoff = composeClineHandoff({
+      prompt: options.prompt as ReadonlyArray<unknown>,
+      tools,
+    })
     const promptText = handoff.text
     logPromptDebug("generate", options.prompt as ReadonlyArray<unknown>, promptText, handoff.diagnostics)
+
+    // Slash-command bypass: opencode rewrites `/<skill>` user input into a
+    // `<command-instruction>` block that tells the model "Run the X skill
+    // workflow". Custom cline builds (e.g. GaussO3-CLI) reliably ignore
+    // that instruction — they just answer with their own tools, so the
+    // skill content never actually loads. We intercept the directive
+    // here and emit the matching `skill` tool-call directly. opencode
+    // then runs the skill, injects SKILL.md as the next turn's tool-
+    // result, and cline finally sees the skill rules in context.
+    // Source priority: slash command first (deterministic structured
+    // directive), then natural-language pattern (user prose). Both emit
+    // the same skill tool-call shape; only providerMetadata.cline.
+    // skillBypassSource differs so downstream telemetry can tell them
+    // apart.
+    const slashSkill = maybeResolveSkillBypass(
+      detectSkillSlashCommand(handoff.commandInstructions),
+      tools,
+      this.modelId,
+      "slash",
+      promptText,
+    )
+    if (slashSkill !== null) return slashSkill
+    const nlSkill = maybeResolveSkillBypass(
+      detectSkillNaturalLanguageInHandoff(promptText),
+      tools,
+      this.modelId,
+      "natural-language",
+      promptText,
+    )
+    if (nlSkill !== null) return nlSkill
+
     const runner = this.options.mode === "acp" ? runOnceAcp : runOnce
     const result = await runner({
       prompt: promptText,
@@ -77,10 +121,34 @@ export class ClineLanguageModel implements LanguageModelV3 {
       signal: options.abortSignal,
     })
 
-    const finishReason: LanguageModelV3FinishReason = { unified: "stop", raw: undefined }
+    // Extract `<opencode-call>` tags from cline's text and convert them to
+    // V3 tool-call content parts. When at least one is found we MUST set
+    // finishReason = "tool-calls" so opencode dispatches them; otherwise
+    // the call is a no-op and we keep "stop".
+    const registeredToolNames = registeredSupportedToolNames(tools)
+    const parsed =
+      registeredToolNames.size > 0
+        ? parseOpencodeCallsOnce(result.text, registeredToolNames)
+        : { text: result.text, calls: [] }
+    const content: Array<LanguageModelV3StreamPart | { type: "text"; text: string } | { type: "tool-call"; toolCallId: string; toolName: string; input: string }> = []
+    if (parsed.text.length > 0) content.push({ type: "text", text: parsed.text })
+    for (const call of parsed.calls) {
+      content.push({
+        type: "tool-call",
+        toolCallId: cryptoToolCallId(),
+        toolName: call.toolName,
+        input: JSON.stringify(call.input),
+      })
+    }
+    const finishReason: LanguageModelV3FinishReason =
+      parsed.calls.length > 0
+        ? { unified: "tool-calls", raw: undefined }
+        : { unified: "stop", raw: undefined }
 
     return {
-      content: [{ type: "text", text: result.text }],
+      // The union above keeps the types narrow; cast at the boundary to the
+      // SDK's Content[] type. All entries are valid V3 content variants.
+      content: content as Awaited<ReturnType<LanguageModelV3["doGenerate"]>>["content"],
       finishReason,
       usage: toV3Usage(result.usage),
       warnings: [],
@@ -93,6 +161,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
         cline: {
           parseErrors: result.parseErrors,
           modelLabel: this.modelId,
+          opencodeCalls: parsed.calls.length,
           ...(result.contextMax !== undefined ? { contextMax: result.contextMax } : {}),
         },
       },
@@ -104,10 +173,40 @@ export class ClineLanguageModel implements LanguageModelV3 {
       throw new Error("Passthrough mode not yet implemented — see docs/provider-modes.md")
     }
 
-    const handoff = composeClineHandoff({ prompt: options.prompt as ReadonlyArray<unknown> })
+    const tools = extractTools(options)
+    const handoff = composeClineHandoff({
+      prompt: options.prompt as ReadonlyArray<unknown>,
+      tools,
+    })
     const promptText = handoff.text
     logPromptDebug("stream", options.prompt as ReadonlyArray<unknown>, promptText, handoff.diagnostics)
     const modelId = this.modelId
+    // Slash-command bypass (see doGenerate above for the rationale). On
+    // the streaming path we return a synthetic ReadableStream that emits
+    // just the skill tool-call + finishReason: tool-calls. opencode
+    // dispatches the skill and re-enters us on the next turn.
+    const slashStream = maybeResolveSkillBypassStream(
+      detectSkillSlashCommand(handoff.commandInstructions),
+      tools,
+      modelId,
+      "slash",
+      promptText,
+    )
+    if (slashStream !== null) return slashStream
+    const nlStream = maybeResolveSkillBypassStream(
+      detectSkillNaturalLanguageInHandoff(promptText),
+      tools,
+      modelId,
+      "natural-language",
+      promptText,
+    )
+    if (nlStream !== null) return nlStream
+
+    const registeredToolNames = registeredSupportedToolNames(tools)
+    // Only instantiate the parser when at least one supported tool is
+    // registered — saves the per-delta scan in the (very common) title /
+    // summary / compaction calls that arrive without tools.
+    const parserActive = registeredToolNames.size > 0
     const command = this.options.command
     const timeoutMs = this.options.timeoutMs
     const extraArgs = this.options.extraArgs
@@ -116,10 +215,45 @@ export class ClineLanguageModel implements LanguageModelV3 {
     const streamFn = this.options.mode === "acp" ? runStreamAcp : runStream
     const responseId = cryptoRandomId()
 
+    // Tie consumer cancellation (reader.cancel(), opencode tearing down
+    // the session, GC of an unread stream) to upstream abort. Without
+    // this, cline keeps running until timeout AND the runner loop keeps
+    // calling controller.enqueue on a closed controller, which throws.
+    // The internal controller defers to options.abortSignal AND fires on
+    // the ReadableStream's own cancel hook.
+    const internalAbort = new AbortController()
+    if (options.abortSignal) {
+      if (options.abortSignal.aborted) internalAbort.abort()
+      else options.abortSignal.addEventListener("abort", () => internalAbort.abort(), { once: true })
+    }
+    let streamCancelled = false
+
     const stream = new ReadableStream<LanguageModelV3StreamPart>({
       async start(controller) {
-        controller.enqueue({ type: "stream-start", warnings: [] })
-        controller.enqueue({
+        // Safe enqueue: silently drop after cancellation rather than
+        // throwing "Invalid state: Controller is already closed". The
+        // runner loop is async and may have one or two events in flight
+        // when the consumer cancels.
+        const safeEnqueue = (part: LanguageModelV3StreamPart) => {
+          if (streamCancelled) return
+          try {
+            controller.enqueue(part)
+          } catch {
+            streamCancelled = true
+          }
+        }
+        const safeClose = () => {
+          if (streamCancelled) return
+          streamCancelled = true
+          try {
+            controller.close()
+          } catch {
+            /* already closed */
+          }
+        }
+
+        safeEnqueue({ type: "stream-start", warnings: [] })
+        safeEnqueue({
           type: "response-metadata",
           id: responseId,
           timestamp: new Date(),
@@ -135,13 +269,13 @@ export class ClineLanguageModel implements LanguageModelV3 {
         const openTextBlock = (): string => {
           if (activeTextBlockId !== null) return activeTextBlockId
           const id = `text-${textBlockCounter++}`
-          controller.enqueue({ type: "text-start", id })
+          safeEnqueue({ type: "text-start", id })
           activeTextBlockId = id
           return id
         }
         const closeTextBlock = () => {
           if (activeTextBlockId === null) return
-          controller.enqueue({ type: "text-end", id: activeTextBlockId })
+          safeEnqueue({ type: "text-end", id: activeTextBlockId })
           activeTextBlockId = null
         }
 
@@ -154,37 +288,88 @@ export class ClineLanguageModel implements LanguageModelV3 {
           totalCost: undefined,
         }
         let parseErrors = 0
-        let emittedToolCall = false
+        let emittedOpencodeCallCount = 0
+        const parser = parserActive ? new OpencodeCallParser() : null
+        const emitOpencodeCalls = (calls: ReadonlyArray<OpencodeCall>) => {
+          for (const call of calls) {
+            if (!registeredToolNames.has(call.toolName)) {
+              // Registered-tool mismatch: don't dispatch — the host may not
+              // have this tool in the current call. Surface the parsed body
+              // as text so the user still sees what cline produced.
+              const fallback = `<opencode-call name="${call.toolName}">${JSON.stringify(call.input)}</opencode-call>`
+              const id = openTextBlock()
+              safeEnqueue({ type: "text-delta", id, delta: fallback })
+              continue
+            }
+            closeTextBlock()
+            safeEnqueue({
+              type: "tool-call",
+              toolCallId: cryptoToolCallId(),
+              toolName: call.toolName,
+              input: JSON.stringify(call.input),
+            })
+            emittedOpencodeCallCount++
+          }
+        }
         try {
           for await (const ev of streamFn({
             prompt: promptText,
             options: { command, timeoutMs, extraArgs, cwd, env },
-            signal: options.abortSignal,
+            signal: internalAbort.signal,
           })) {
+            if (streamCancelled) break
             if (ev.type === "text-delta") {
-              const id = openTextBlock()
-              controller.enqueue({ type: "text-delta", id, delta: ev.delta })
+              if (parser !== null) {
+                const out = parser.feed(ev.delta)
+                if (out.text.length > 0) {
+                  const id = openTextBlock()
+                  safeEnqueue({ type: "text-delta", id, delta: out.text })
+                }
+                if (out.calls.length > 0) emitOpencodeCalls(out.calls)
+              } else {
+                const id = openTextBlock()
+                safeEnqueue({ type: "text-delta", id, delta: ev.delta })
+              }
             } else if (ev.type === "tool-call") {
               closeTextBlock()
-              // Emit a regular (non-provider-executed) tool-call for
-              // opencode's built-in `read` tool. opencode's session
-              // processor invokes its read-tool handler, which runs
-              // `LSP.touchFile(filePath)` — that is what activates the
-              // matching language server in the right-hand "LSP" panel
-              // ("LSPs will activate as files are read"). We deliberately
-              // pair this with `finishReason: "stop"` below so opencode
-              // does NOT continue the conversation loop with the tool
-              // result; cline already produced the final answer.
-              controller.enqueue({
+              // Bridge a cline-side tool invocation to opencode's stream.
+              // cline already ran the tool, so we surface it as
+              // provider-executed: opencode shows the call + result in
+              // the UI but does NOT re-execute. The matching tool-result
+              // event (right below) carries cline's captured output.
+              //
+              // Historical note: `read` was the only tool we bridged
+              // before, and we deliberately did NOT set
+              // `providerExecuted: true` because opencode's read handler
+              // runs `LSP.touchFile(filePath)` as a side effect —
+              // re-execution there is actively desirable. To preserve
+              // that behavior we keep `read` unflagged so opencode
+              // re-runs it; every other bridged tool is marked
+              // provider-executed.
+              const providerExecuted = ev.toolName !== "read"
+              safeEnqueue({
                 type: "tool-call",
                 toolCallId: ev.toolCallId,
                 toolName: ev.toolName,
                 input: JSON.stringify(ev.input),
+                ...(providerExecuted ? { providerExecuted: true } : {}),
               })
-              emittedToolCall = true
             } else if (ev.type === "tool-result") {
-              // No-op: opencode generates the real tool-result by running
-              // the read tool itself. We only emit the tool-call.
+              // For provider-executed bridged tools (bash/grep/glob/…),
+              // surface the cline-captured result so the host UI can
+              // render it. For `read` we still skip the result because
+              // opencode runs its own read tool (see comment above).
+              if (ev.toolName !== "read") {
+                safeEnqueue({
+                  type: "tool-result",
+                  toolCallId: ev.toolCallId,
+                  toolName: ev.toolName,
+                  result: ev.result as Awaited<ReturnType<LanguageModelV3["doStream"]>> extends infer _
+                    ? Record<string, unknown>
+                    : never,
+                  ...(ev.isError === true ? { isError: true } : {}),
+                } as LanguageModelV3StreamPart)
+              }
             } else if (ev.type === "finish") {
               usage = ev.usage
               parseErrors = ev.parseErrors
@@ -192,31 +377,63 @@ export class ClineLanguageModel implements LanguageModelV3 {
               throw ev.error
             }
           }
+          // Flush any buffered tail before closing the text block. This
+          // covers the case where cline ended mid-tag (partial open marker)
+          // — we surface the fragment as text rather than dropping it.
+          if (parser !== null) {
+            const tail = parser.flush()
+            if (tail.text.length > 0) {
+              const id = openTextBlock()
+              safeEnqueue({ type: "text-delta", id, delta: tail.text })
+            }
+          }
           closeTextBlock()
-          // Always end with `stop` — even when we emitted provider-executed
-          // tool-calls. cline finished its task autonomously, so opencode
-          // should not feed any "tool result" back into the model.
-          // (`tool-calls` reason caused an infinite re-prompt loop in
-          // testing; `providerExecuted: true` on the tool-call is what
-          // signals to opencode that we already ran it.)
-          void emittedToolCall
-          controller.enqueue({
+          // finishReason logic:
+          //   - opencode-calls extracted → "tool-calls": opencode dispatches
+          //     and re-enters cline on the next turn with tool-result.
+          //   - cline-side tool-calls only (read) → "stop": those were
+          //     provider-executed by cline itself; re-feeding them caused
+          //     infinite re-prompt loops in earlier testing.
+          //   - no tool-calls of any kind → "stop": normal terminal answer.
+          safeEnqueue({
             type: "finish",
-            finishReason: { unified: "stop", raw: undefined },
+            finishReason: emittedOpencodeCallCount > 0
+              ? { unified: "tool-calls", raw: undefined }
+              : { unified: "stop", raw: undefined },
             usage: toV3Usage(usage),
             providerMetadata: {
-              cline: { parseErrors, modelLabel: modelId },
+              cline: { parseErrors, modelLabel: modelId, opencodeCalls: emittedOpencodeCallCount },
             },
           })
-          controller.close()
+          safeClose()
         } catch (err) {
+          // Flush parser BEFORE emitting the error so any buffered partial
+          // tag is surfaced as text — matches the success-path philosophy
+          // ("partial output never silently disappears") and keeps the
+          // user from losing prose that was already in flight when cline
+          // crashed mid-tag.
+          if (parser !== null) {
+            const tail = parser.flush()
+            if (tail.text.length > 0) {
+              const id = openTextBlock()
+              safeEnqueue({ type: "text-delta", id, delta: tail.text })
+            }
+          }
           closeTextBlock()
-          controller.enqueue({
+          safeEnqueue({
             type: "error",
             error: err instanceof Error ? err : new Error(String(err)),
           })
-          controller.close()
+          safeClose()
         }
+      },
+      cancel() {
+        // Consumer cancelled (reader.cancel(), session teardown, GC). Mark
+        // the stream cancelled so the runner loop's safeEnqueue calls
+        // become no-ops, and abort the upstream cline subprocess so it
+        // doesn't keep running until the global timeout.
+        streamCancelled = true
+        internalAbort.abort()
       },
     })
 
@@ -229,6 +446,192 @@ export class ClineLanguageModel implements LanguageModelV3 {
 
 function cryptoRandomId(): string {
   return `cline-${randomUUID()}`
+}
+
+function cryptoToolCallId(): string {
+  return `cline-call-${randomUUID()}`
+}
+
+/**
+ * Project `options.tools` (LanguageModelV3CallOptions) onto the minimal shape
+ * the handoff builder and parser allow-list use. opencode passes a mix of
+ * function tools and provider tools; we only care about the `.name` of
+ * function tools. Provider tools come through as a different shape — guard
+ * with a typeof check so we never read a missing field.
+ */
+function extractTools(options: LanguageModelV3CallOptions): ProtocolToolDescriptor[] {
+  const tools = options.tools
+  if (!tools || tools.length === 0) return []
+  const out: ProtocolToolDescriptor[] = []
+  for (const t of tools) {
+    const name = (t as { name?: unknown }).name
+    if (typeof name === "string" && name.length > 0) out.push({ name })
+  }
+  return out
+}
+
+function registeredSupportedToolNames(tools: readonly ProtocolToolDescriptor[]): ReadonlySet<string> {
+  const names = new Set<string>()
+  for (const tool of tools) {
+    if (SUPPORTED_OPENCODE_CALL_TOOLS.has(tool.name)) names.add(tool.name)
+  }
+  return names
+}
+
+/**
+ * One-shot variant of OpencodeCallParser for the doGenerate path, where we
+ * already have the full text. Returns the cleaned text plus any complete
+ * tool-calls. Partial / malformed fragments are surfaced as text (same
+ * fallback as the streaming parser) so nothing silently disappears.
+ */
+/**
+ * Slash-command bypass (doGenerate path). When the prompt contains a
+ * `<command-instruction>` block whose text says "Run the <X> skill workflow"
+ * AND the `skill` tool is registered for this turn, return a synthetic
+ * GenerateResult that emits a single `skill` tool-call. opencode picks
+ * it up, runs the skill, and resumes us on the next turn with SKILL.md
+ * already loaded into the conversation.
+ *
+ * Returns null when no bypass applies — caller proceeds with the normal
+ * cline subprocess path.
+ */
+type SkillBypassSource = "slash" | "natural-language"
+
+function bypassMetadata(skillName: string, modelId: string, source: SkillBypassSource) {
+  return {
+    cline: {
+      opencodeCalls: 1,
+      // Legacy field name kept for downstream consumers that already
+      // read it — set on both slash and natural-language bypass so
+      // they don't lose telemetry signal when the source widens.
+      skillSlashBypass: skillName,
+      skillBypassSource: source,
+      modelLabel: modelId,
+    },
+  }
+}
+
+function bypassFinishRaw(source: SkillBypassSource): string {
+  return source === "slash" ? "skill-slash-bypass" : "skill-natural-language-bypass"
+}
+
+/**
+ * doGenerate-side bypass. Given a resolved skill name (from either the
+ * slash-command detector or the natural-language detector), returns a
+ * synthetic GenerateResult that emits a single `skill` tool-call so
+ * opencode dispatches and resumes us with SKILL.md already loaded.
+ * Returns null when no bypass applies.
+ */
+function maybeResolveSkillBypass(
+  skillName: string | null,
+  tools: readonly ProtocolToolDescriptor[],
+  modelId: string,
+  source: SkillBypassSource,
+  handoffText: string,
+): Awaited<ReturnType<LanguageModelV3["doGenerate"]>> | null {
+  if (skillName === null) return null
+  if (!tools.some((t) => t.name === "skill")) return null
+  // Loop guard: if THIS skill was already dispatched earlier in the
+  // conversation (opencode resumed us with the prior tool-result), the
+  // user's <command-instruction> directive is stale — emitting another
+  // skill tool-call would loop forever. See
+  // isSkillAlreadyDispatchedInHandoff for the byte-level detection.
+  if (isSkillAlreadyDispatchedInHandoff(handoffText, skillName)) return null
+  const toolCallId = cryptoToolCallId()
+  const content = [
+    {
+      type: "tool-call" as const,
+      toolCallId,
+      toolName: "skill",
+      input: JSON.stringify({ name: skillName }),
+    },
+  ]
+  return {
+    content: content as Awaited<ReturnType<LanguageModelV3["doGenerate"]>>["content"],
+    finishReason: { unified: "tool-calls", raw: bypassFinishRaw(source) },
+    usage: toV3Usage({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+      totalTokens: 0,
+      totalCost: undefined,
+    }),
+    warnings: [],
+    response: {
+      id: cryptoRandomId(),
+      timestamp: new Date(),
+      modelId,
+    },
+    providerMetadata: bypassMetadata(skillName, modelId, source),
+  }
+}
+
+/**
+ * doStream-side counterpart of `maybeResolveSkillBypass`. Wraps the
+ * single skill tool-call + finish event in a one-shot ReadableStream.
+ * cline is not spawned.
+ */
+function maybeResolveSkillBypassStream(
+  skillName: string | null,
+  tools: readonly ProtocolToolDescriptor[],
+  modelId: string,
+  source: SkillBypassSource,
+  handoffText: string,
+): Awaited<ReturnType<LanguageModelV3["doStream"]>> | null {
+  if (skillName === null) return null
+  if (!tools.some((t) => t.name === "skill")) return null
+  if (isSkillAlreadyDispatchedInHandoff(handoffText, skillName)) return null
+  const toolCallId = cryptoToolCallId()
+  const responseId = cryptoRandomId()
+  const stream = new ReadableStream<LanguageModelV3StreamPart>({
+    start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] })
+      controller.enqueue({
+        type: "response-metadata",
+        id: responseId,
+        timestamp: new Date(),
+        modelId,
+      })
+      controller.enqueue({
+        type: "tool-call",
+        toolCallId,
+        toolName: "skill",
+        input: JSON.stringify({ name: skillName }),
+      })
+      controller.enqueue({
+        type: "finish",
+        finishReason: { unified: "tool-calls", raw: bypassFinishRaw(source) },
+        usage: toV3Usage({
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+          totalTokens: 0,
+          totalCost: undefined,
+        }),
+        providerMetadata: bypassMetadata(skillName, modelId, source),
+      })
+      controller.close()
+    },
+  })
+  return { stream, response: { headers: {} } }
+}
+
+function parseOpencodeCallsOnce(text: string, registeredToolNames: ReadonlySet<string>): { text: string; calls: OpencodeCall[] } {
+  const parser = new OpencodeCallParser()
+  const out = parser.feed(text)
+  const tail = parser.flush()
+  const calls: OpencodeCall[] = []
+  let visibleText = out.text + tail.text
+  for (const call of [...out.calls, ...tail.calls]) {
+    if (registeredToolNames.has(call.toolName)) {
+      calls.push(call)
+    } else {
+      visibleText += `<opencode-call name="${call.toolName}">${JSON.stringify(call.input)}</opencode-call>`
+    }
+  }
+  return { text: visibleText, calls }
 }
 
 function logPromptDebug(

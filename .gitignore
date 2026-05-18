@@ -39,6 +39,15 @@ coverage/
 .tmp/
 .cache/
 
+# Diagnostic dumps (OPENCODE_ANYCLI_PROMPTLOG / OPENCODE_ANYCLI_CLINE_NDJSON_LOG
+# / OPENCODE_ANYCLI_USAGELOG sinks). Often dropped at the repo root during
+# debugging — keep them out of git so they never sneak into a commit.
+*.ndjson
+prompt.txt
+prompt-*.log
+cline-open*
+cline-raw*
+
 # Lockfile is regenerated on every npm install / install.sh run; tracking
 # it churns the diff with no useful signal and breaks --update auto-stash.
 package-lock.json

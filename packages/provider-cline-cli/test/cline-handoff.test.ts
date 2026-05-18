@@ -145,4 +145,41 @@ describe("composeClineHandoff", () => {
     expect(result.text).toContain(request)
     expect(result.text).toContain("[stdout omitted")
   })
+
+  it("omits the OPENCODE_CALL_PROTOCOL section when no tools are supplied", () => {
+    const result = composeClineHandoff({
+      prompt: [{ role: "user", content: "hi" }],
+    })
+    expect(result.text).not.toContain("[OPENCODE_CALL_PROTOCOL]")
+    expect(result.diagnostics.protocolBytes).toBe(0)
+  })
+
+  it("omits the protocol section when registered tools are unrelated", () => {
+    const result = composeClineHandoff({
+      prompt: [{ role: "user", content: "hi" }],
+      tools: [{ name: "bash" }, { name: "edit" }],
+    })
+    expect(result.text).not.toContain("[OPENCODE_CALL_PROTOCOL]")
+    expect(result.diagnostics.protocolBytes).toBe(0)
+  })
+
+  it("appends the OPENCODE_CALL_PROTOCOL section when task is registered", () => {
+    const result = composeClineHandoff({
+      prompt: [{ role: "user", content: "review this branch" }],
+      tools: [{ name: "task" }, { name: "bash" }],
+    })
+    expect(result.text).toContain("[OPENCODE_CALL_PROTOCOL]")
+    expect(result.text).toContain('<opencode-call name="task">')
+    expect(result.text).not.toContain('<opencode-call name="skill">')
+    expect(result.diagnostics.protocolBytes).toBeGreaterThan(0)
+  })
+
+  it("appends both task and skill lines when both tools are registered", () => {
+    const result = composeClineHandoff({
+      prompt: [{ role: "user", content: "do work" }],
+      tools: [{ name: "task" }, { name: "skill" }, { name: "edit" }],
+    })
+    expect(result.text).toContain('<opencode-call name="task">')
+    expect(result.text).toContain('<opencode-call name="skill">')
+  })
 })

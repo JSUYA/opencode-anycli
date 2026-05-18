@@ -1,8 +1,10 @@
 # @opencode-anycli/provider-cline-cli
 
-A Vercel AI SDK v3 `LanguageModelV3` adapter that delegates generation to a locally installed `cline` CLI subprocess.
-
-## Usage
+A Vercel AI SDK v3 `LanguageModelV3` adapter that delegates generation to a
+locally installed `cline` CLI subprocess. opencode-anycli wires this adapter
+into opencode so a single `opencode` session can drive any model `cline` is
+configured for — while still surfacing cline's tool activity (file reads,
+shell commands, edits, searches, …) as first-class entries in opencode's UI.
 
 ```ts
 import { createCline } from "@opencode-anycli/provider-cline-cli"
@@ -11,6 +13,301 @@ const provider = createCline()
 const model = provider.languageModel("default")
 ```
 
-The adapter currently supports subprocess mode. See the repository documentation for opencode integration details.
+---
 
-It forwards cline's visible text stream and maps cline token/cache usage into the AI SDK v3 usage shape.
+## Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│  opencode TUI / session                                          │
+│  ├─ slash commands (/karpathy, /code-review, …)                  │
+│  ├─ V3 stream consumer (text-delta, tool-call, tool-result, …)   │
+│  └─ tool registry (read, edit, write, bash, grep, glob, skill, … │
+└──────────────────────────▲──────────────────────────────────────┘
+                           │  LanguageModelV3 contract
+┌──────────────────────────┴──────────────────────────────────────┐
+│  ClineLanguageModel  (this package)                              │
+│                                                                  │
+│  composeClineHandoff() ──▶  prompt + protocol + commandInstr     │
+│         │                                                        │
+│         ├─ maybeBypassForSkillSlashCommand()                     │
+│         │     └─ short-circuits cline when prompt contains a     │
+│         │        "Run the `X` skill workflow" directive AND      │
+│         │        skill is registered → emits skill tool-call     │
+│         │        directly, opencode loads SKILL.md content       │
+│         │                                                        │
+│         ▼                                                        │
+│  runStream() / runOnce() (cline subprocess)                      │
+│         │                                                        │
+│         ├─ NDJSON splitter / parser                              │
+│         ├─ OpencodeCallParser    ───▶ structured tool-calls      │
+│         │   (parses <opencode-call name="task|skill"/> tags)     │
+│         ├─ ClineToolBridge       ───▶ structured tool-calls      │
+│         │   (maps cline's native tools onto opencode tools)      │
+│         └─ usage harvesting (banner + persisted task state)      │
+└─────────────────────────────────────────────────────────────────┘
+                           │  spawn
+                           ▼
+                    cline CLI subprocess
+```
+
+### What this gets you
+
+1. **cline-native tool activity becomes first-class opencode tool events.**
+   Every `say.tool` / `say.command` / `ask.command_output` cline emits is
+   translated to a V3 `tool-call` + `tool-result` pair, so opencode's UI
+   shows file reads, edits, shell commands, searches, … instead of just
+   the final text.
+
+2. **Skill slash-commands actually load skill content.** When the user
+   types `/karpathy ...` opencode rewrites the prompt with a
+   `<command-instruction>Run the \`karpathy-guidelines\` skill workflow...`
+   block. Custom cline builds (e.g. GaussO3-CLI) reliably ignore those
+   directives — they just answer with their own tools. The adapter
+   intercepts the directive and emits the `skill` tool-call before cline
+   is even spawned; opencode then loads `SKILL.md` into the conversation
+   so the *next* turn cline sees the real skill rules in context.
+
+3. **`<opencode-call>` protocol** stays available for compliant cline
+   builds. When cline emits `<opencode-call name="X">{...}</opencode-call>`
+   tags inside its text stream, the parser extracts them and forwards as
+   V3 tool-call parts with `finishReason: "tool-calls"` so opencode runs
+   the host-side dispatch and re-enters cline with the tool-result.
+
+---
+
+## Implementation scope
+
+### Mode coverage
+
+| Mode | Status | Notes |
+|---|---|---|
+| `subprocess` | ✅ default | `cline --json --yolo --act <prompt>`. Large prompts spill to a `0600` temp file (see `prompt-tempfile.ts`) to dodge Linux `MAX_ARG_STRLEN`. |
+| `acp` | ✅ opt-in | `cline --acp` over Agent Client Protocol stdio. Tool bridging applies. |
+| `passthrough` | 🚧 planned | Would call the model directly using cline credentials. Not implemented. |
+
+### cline → opencode tool bridge
+
+`packages/provider-cline-cli/src/cline-tool-bridge.ts` maps cline's
+NDJSON tool events onto opencode's V3 tool registry. The alias map
+recognises **every cline tool spelling we have observed across releases**
+(camelCase ↔ snake_case ↔ legacy aliases); unknown tools fall through
+as `cline:<name>` so the activity is visible even before the table is
+updated for a future cline release.
+
+| cline tool (aliases) | opencode tool | input shape forwarded | result body forwarded |
+|---|---|---|---|
+| `readFile` / `read_file` / `read` | `read` | `filePath`, `offset`, `limit` | `{ ok, filePath }` (no `output` — opencode re-runs read to drive LSP) |
+| `write_to_file` / `writeToFile` / `write_file` / `newFile` / `createFile` / `write` | `write` | `filePath`, `content` | `{ ok, filePath }` |
+| `replace_in_file` / `replaceInFile` / `apply_diff` / `applyDiff` / `edit_file` / `patch_file` / `edit` | `edit` | `filePath`, `diff` | `{ ok, filePath }` |
+| `execute_command` / `executeCommand` / `exec_command` / `bash` / `shell` / `command` / `run_command` (also `say.command` raw text) | `bash` | `command` | `{ ok, stdout, exitCode? }` (paired from `ask.command_output`) |
+| `search_files` / `searchFiles` / `search` / `grep` / `ripgrep` | `grep` | `pattern`, `path`, `include?` | `{ ok, output? }` (the search hits body) |
+| `list_files` / `listFiles` / `ls` / `list_dir` / `list_directory` / `glob` | `glob` | `pattern` (recursive→`<path>/**`) | `{ ok, output? }` (the listing) |
+| `web_fetch` / `webFetch` / `fetch_url` / `fetch` / `webfetch` | `webfetch` | `url` | `{ ok }` |
+| `web_search` / `webSearch` / `websearch` | `websearch` | `query` | `{ ok }` |
+| *(unknown)* | `cline:<original-name>` | passthrough of primitive/JSON-clonable fields (minus `tool`) | `{ ok }` |
+
+#### `providerExecuted` policy
+
+cline already ran the tool, so bridged tool-calls are forwarded with
+`providerExecuted: true` and a result body — opencode shows them in the
+UI but does NOT re-execute. The single exception is **`read`**: opencode's
+read handler runs `LSP.touchFile(filePath)` as a side effect, and that
+side effect is worth re-running. So `read` is forwarded unflagged and
+opencode runs its own read tool to keep LSP activation working.
+
+### Skill bypass — sources
+
+Two pre-cline detectors feed the same dispatch path. Slash takes
+priority (deterministic structured directive) and natural-language
+fires when no slash directive is present.
+
+`providerMetadata.cline.skillBypassSource` is `"slash"` or
+`"natural-language"`; both also set `skillSlashBypass` to the dispatched
+skill name (legacy field kept for downstream consumers).
+
+#### Slash-command bypass
+
+`packages/provider-cline-cli/src/opencode-call-parser.ts::detectSkillSlashCommand`
+inspects every `<command-instruction>` block in the prompt for the
+phrase
+
+```
+Run the `<skill-name>` skill workflow
+```
+
+When matched AND `skill` is in `options.tools`, `language-model.ts::
+maybeBypassForSkillSlashCommand{,Stream}` short-circuits the cline
+subprocess and emits a single V3 stream:
+
+```jsonc
+// stream-start
+// response-metadata
+{ "type": "tool-call", "toolName": "skill", "input": "{\"name\":\"<skill-name>\"}" }
+{ "type": "finish", "finishReason": { "unified": "tool-calls", "raw": "skill-slash-bypass" } }
+```
+
+`providerMetadata.cline.skillSlashBypass` is set to the dispatched
+skill name for telemetry. opencode runs the skill, injects `SKILL.md`
+content as the next turn's tool-result, and the conversation resumes
+through cline normally — only now cline has the loaded skill rules
+in its context.
+
+#### Natural-language bypass
+
+`detectSkillNaturalLanguage` brings the same dispatch up to the level
+of bare prose. When the user types something like:
+
+```
+karpathy-guidelines 스킬로 분석해줘
+use the code-review skill
+dead-code-finder 적용해줘
+```
+
+…the detector matches a skill name from the `<available_skills>`
+catalog adjacent to a trigger token (`use`/`apply`/`run`/`invoke`,
+Korean `로`/`을`/`스킬` patterns, …) and dispatches the same skill
+tool-call. Trigger patterns are deliberately conservative:
+
+- An adjacent trigger verb / particle is required — `tell me about
+  the X skill` does NOT fire (no imperative tail).
+- Closed-world: only names present in the prompt's `<available_skills>`
+  catalog can match. `phantom-skill 적용해줘` is a no-op when
+  `phantom-skill` isn't registered.
+- Longest-id-first match — `code-review` wins over a bare `code` when
+  both are catalogued and both appear in the prompt.
+
+### `<opencode-call>` protocol
+
+For cline builds that DO honor user-task directives, the adapter
+optionally appends an `[OPENCODE_CALL_PROTOCOL]` section to the handoff
+when `task` and/or `skill` is registered. cline-compliant models emit:
+
+```text
+<opencode-call name="task">{"subagent_type":"<agent>","description":"<3-5 words>","prompt":"<text>"}</opencode-call>
+<opencode-call name="skill">{"name":"<skill-name>"}</opencode-call>
+```
+
+The parser strips these tags from the text stream and forwards them as
+V3 tool-call parts. `finishReason` flips to `"tool-calls"` so opencode
+dispatches them and the multi-turn loop continues.
+
+Note: the GaussO3-CLI custom cline build ignores this protocol. The
+slash-command bypass above is the durable path on that model; the
+protocol is a best-effort overlay for cooperative builds.
+
+---
+
+## Interface surface
+
+### Public exports
+
+| Symbol | From | Purpose |
+|---|---|---|
+| `createCline(opts?)` | `index.ts` | Factory that returns an AI SDK provider. |
+| `ClineLanguageModel` | `language-model.ts` | The `LanguageModelV3` implementation. |
+| `composeClineHandoff(input)` | `cline-handoff.ts` | Builds the cline subprocess prompt. Returns `{ text, diagnostics, commandInstructions }`. |
+| `runStream(input)` | `cline-runner.ts` | Streaming runner (low-level). |
+| `runOnce(input)` | `cline-runner.ts` | Buffered runner (low-level). |
+| `bridgeClineToolEvent(payload)` | `cline-tool-bridge.ts` | Translate a cline `say.tool` JSON body to a bridged opencode event. |
+| `bridgeClineCommandStart(text)` | `cline-tool-bridge.ts` | Translate a cline `say.command` shell line to a bridged `bash` call. |
+| `buildCommandOutputResult(out, exitCode?)` | `cline-tool-bridge.ts` | Format the matching tool-result body. |
+| `resolveOpencodeTool(clineName)` | `cline-tool-bridge.ts` | Look up the opencode tool name for any cline alias. |
+| `OpencodeCallParser` | `opencode-call-parser.ts` | Streaming `<opencode-call>` tag parser. |
+| `detectSkillSlashCommand(instr)` | `opencode-call-parser.ts` | Extract the skill name from a `Run the X skill workflow` directive. |
+| `SUPPORTED_OPENCODE_CALL_TOOLS` | `opencode-call-parser.ts` | Allow-list (`task`, `skill`) for protocol dispatch. |
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `OPENCODE_ANYCLI_CLINE_BIN` | Override the cline binary path. |
+| `OPENCODE_ANYCLI_CLINE_NDJSON_LOG` | Append every raw NDJSON line from cline to this file (diagnostics). |
+| `OPENCODE_ANYCLI_PROMPTLOG` | Append every prompt + diagnostics to this file. |
+| `OPENCODE_ANYCLI_USAGELOG` | Append every usage mapping (raw → V3) to this file. |
+| `OPENCODE_ANYCLI_TTY` | `0` to disable inherited stdin (default: inherit). |
+| `OPENCODE_ANYCLI_ARGV_LIMIT` | Bytes; force prompt-file spill when handoff exceeds this size. |
+| `DEBUG` | `1` to mirror cline NDJSON and stderr to the provider's stderr. |
+
+### Provider options (`ClineProviderOptions`)
+
+| Field | Default | Notes |
+|---|---|---|
+| `mode` | `"subprocess"` | `"acp"` opt-in transport; `"passthrough"` planned. |
+| `command` | `"cline"` | Resolved via `PATH`. Overridable via env var above. |
+| `timeoutMs` | `3_600_000` (1 hour) | Subprocess kill after this many ms. |
+| `extraArgs` | `[]` | Appended after `--json --yolo --act`. |
+| `cwd` | (inherit) | Working directory. |
+| `env` | `{}` | Merged into the spawned process env. |
+
+---
+
+## Forward compatibility
+
+cline's tool inventory has changed across releases (camelCase ↔ snake_case
+mixed, additions, renames). The adapter is designed so that **a new cline
+version doesn't require a provider release**:
+
+1. `CLINE_TO_OPENCODE_ALIASES` accepts any spelling we've observed; new
+   ones can be added without touching the runner or language-model.
+2. Unknown cline tools fall through as `cline:<original-name>` —
+   activity remains visible in the opencode UI even if a new tool isn't
+   in the alias map yet.
+3. NDJSON parsing is schema-tolerant: each field is fetched defensively
+   and missing fields are absent rather than synthesized. cline can add
+   new fields freely; we ignore what we don't recognise.
+4. Both the legacy event schema (`task_started` / `say.*` / `ask.*`)
+   and the current schema (`hook_event` + `agent_event.*` + `run_result`)
+   are parsed in parallel — adding a new schema variant is additive.
+
+---
+
+## Per-agent permission requirement
+
+opencode auto-enables `task` for primary agents, but `skill` is opt-in.
+Add `skill: true` to the agent's `tools` whitelist in
+`~/.config/opencode-anycli/opencode/agents/<agent>.md` to make slash-command
+bypass and protocol dispatch actually fire:
+
+```yaml
+---
+name: orchestrator
+tools:
+  bash: true
+  read: true
+  grep: true
+  task: true
+  skill: true
+---
+```
+
+---
+
+## Token / usage handling
+
+The adapter normalises cline's many usage shapes into the V3
+`LanguageModelV3Usage` envelope. Sources, in priority order:
+
+1. `run_result.usage` / `agent_event.done.usage` — terminal totals.
+2. `agent_event.usage` — interim cumulative snapshots.
+3. `api_req_started` / `api_req_finished` — per-API-call snapshots
+   (latest by timestamp; never summed — cline emits both partial and
+   final variants of the same call).
+4. `# Context Window Usage` banner inside `environment_details` — text
+   fallback when the provider doesn't populate structured fields.
+5. Persisted `~/.cline/data/tasks/<id>/ui_messages.json` and
+   `api_conversation_history.json` — read after stdout closes so the
+   final token count survives even when stdout omits it.
+6. Char-count heuristic (`~3 chars/token`) on the assistant channel,
+   only when input is known but output is zero — keeps opencode's
+   context panel advancing.
+
+`providerMetadata.cline.contextMax` is surfaced when the banner reports
+a model context window; opencode renders accurate `%` even when the
+static `limit.context` disagrees with cline's actual upstream model.
+
+---
+
+## License
+
+MIT.
