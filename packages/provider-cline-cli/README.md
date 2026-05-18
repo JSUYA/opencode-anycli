@@ -51,6 +51,50 @@ const model = provider.languageModel("default")
                     cline CLI subprocess
 ```
 
+### Flow diagram
+
+```mermaid
+flowchart TB
+    User[/"User input<br/>(/skill or natural language)"/]
+    Opencode[opencode TUI]
+
+    subgraph Provider [ClineLanguageModel — doGenerate / doStream]
+        Handoff[composeClineHandoff<br/>text + commandInstructions]
+        SlashDetect[detectSkillSlashCommand]
+        NLDetect[detectSkillNaturalLanguageInHandoff]
+        LoopGuard{isSkillAlreadyDispatchedInHandoff?}
+        Bypass[Synthesize skill tool-call<br/>finishReason: tool-calls]
+        Runner[runStream / runOnce<br/>cline subprocess]
+        Bridge[pickBridgedTool<br/>+ bridgeClineToolEvent<br/>+ bridgeClineCommandStart]
+        ProtocolParser[OpencodeCallParser<br/>opencode-call tag stream parser]
+        SafeStream[safeEnqueue / cancel handler]
+    end
+
+    Cline[(cline subprocess)]
+
+    User --> Opencode
+    Opencode -->|prompt + skill tool registered| Handoff
+    Handoff --> SlashDetect
+    Handoff --> NLDetect
+    SlashDetect -- skill name --> LoopGuard
+    NLDetect -- skill name --> LoopGuard
+    LoopGuard -- prior dispatch found --> Runner
+    LoopGuard -- no prior dispatch --> Bypass
+    Bypass --> Opencode
+    Opencode -. SKILL.md load + resume .-> Handoff
+
+    Runner --> Cline
+    Cline -- NDJSON --> Runner
+    Runner --> Bridge
+    Runner --> ProtocolParser
+    Bridge --> SafeStream
+    ProtocolParser --> SafeStream
+    SafeStream --> Opencode
+
+    classDef new fill:#d4f4dd,stroke:#2e7d32
+    class Handoff,SlashDetect,NLDetect,LoopGuard,Bypass,Bridge,ProtocolParser,SafeStream new
+```
+
 ### Why skill bypass exists
 
 opencode registers a `skill` tool but cline ignores it — cline's own system
@@ -59,6 +103,25 @@ loads. The adapter detects the user's skill intent (slash command or
 natural-language phrasing) and synthesizes the `skill` tool-call on
 cline's behalf, so opencode actually loads the skill before resuming
 cline.
+
+### Component summary
+
+| Module | Role |
+|---|---|
+| `cline-tool-bridge.ts` (new) | Maps every cline native tool spelling (`readFile`/`execute_command`/… — 50+ aliases) to opencode's V3 tool registry. Unknown tools surface as a `cline:<name>` text marker. |
+| `opencode-call-parser.ts` (new) | Skill-intent detectors (slash command + natural language), `<opencode-call>` streaming tag parser, and the dispatch loop guard. |
+| `cline-handoff.ts` (extended) | Extracts `<command-instruction>` blocks from the prompt into `ClineHandoffResult.commandInstructions[]` so the language-model layer can decide on the slash-command bypass. |
+| `cline-runner.ts` (extended) | `pickBridgedTool` routes cline NDJSON (`say.tool` / `say.command` / `ask.command_output`) into V3 tool-call + tool-result events. `pendingBashCall` race-guard closes orphaned bash calls on next-bash arrival and on stream end. |
+| `language-model.ts` (extended) | `maybeResolveSkillBypass{,Stream}` short-circuits cline when an intent is detected (and the same skill hasn't already loaded). `safeEnqueue` + `cancel` handler eliminate the reader-cancel race on the V3 stream. |
+
+### Feature summary (1 line each)
+
+1. **Skill slash-command bypass** — turns `/karpathy` etc. into a direct `skill` tool-call before cline is spawned, so opencode actually loads `SKILL.md`.
+2. **Skill natural-language bypass** — same dispatch from prose ("X 스킬로 분석", "use X skill"), gated by a closed-world catalog so unregistered names never fire.
+3. **Loop guard** — once a skill has been loaded in the conversation, the bypass refuses to dispatch the same skill again (name-specific; chaining different skills still works).
+4. **cline native tool bridge** — surfaces cline's `readFile` / `execute_command` / `search_files` / `list_files` / … as first-class opencode tool entries in the UI.
+5. **Forward-compatible unknown-tool fallback** — new cline tool names ship as a `cline:<name>` text marker so the activity is still visible without a provider release.
+6. **Stream cancel-safe pipeline** — reader cancellation / GC tear down the cline subprocess cleanly and downstream `controller.enqueue` calls become no-ops.
 
 ---
 
