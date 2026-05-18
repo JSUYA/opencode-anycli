@@ -26,6 +26,47 @@ ACP mode is implemented as an opt-in transport. It starts `cline --acp`, opens a
 
 Passthrough mode is planned. It would read cline configuration and call the configured model directly from opencode. This can be faster, but it depends on cline's settings schema and does not use cline's own tools.
 
+## opencode-call protocol
+
+cline runs its own internal tool loop and never natively calls opencode's
+host-side tools, so out of the box opencode skills and subagent dispatch
+appear dead even when the system prompt advertises them. The adapter
+teaches cline a small protocol to call back into opencode:
+
+```
+<opencode-call name="task">{"subagent_type":"<agent>","description":"<3-5 words>","prompt":"<text>"}</opencode-call>
+<opencode-call name="skill">{"name":"<skill-name>"}</opencode-call>
+```
+
+When `options.tools` (the V3 tool list opencode passes per turn) contains
+`task` and/or `skill`, the adapter appends a compact `OPENCODE_CALL_PROTOCOL`
+section (~400 bytes) to the cline handoff. cline emits the tag inside its
+normal text stream; the adapter parses the tag, strips it from the visible
+text, and forwards it to opencode as a `tool-call` part with finishReason
+`tool-calls`. opencode dispatches the call, the result lands as a
+`tool-result` on the next turn, and the cline subprocess sees it in
+`TOOL_OBSERVATIONS`.
+
+Per-agent permission: opencode auto-enables `task` for primary agents, but
+`skill` is opt-in. To make the orchestrator (or any primary agent) able to
+load skills, add `skill: true` to the agent's `tools` whitelist in
+`~/.config/opencode-anycli/opencode/agents/<agent>.md`:
+
+```yaml
+---
+name: orchestrator
+tools:
+  bash: true
+  read: true
+  grep: true
+  task: true
+  skill: true
+---
+```
+
+Skipped silently when `options.tools` carries neither `task` nor `skill`
+(title / summary / compaction calls): zero bytes added, zero parser cost.
+
 ## Tradeoff
 
 The subprocess design is conservative. It is slower because opencode delegates to another agent loop, but it is easier to maintain across cline updates and avoids duplicating model credentials.

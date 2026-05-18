@@ -813,6 +813,112 @@ describe("runStream", () => {
     expect(events.join("")).toBe("abc")
     expect(finished).toBe(true)
   })
+
+  it("preserves stdout from bash in runOnce.text (not just in stream tool-result)", async () => {
+    // Reads from the buffered runOnce path — earlier code only forwarded
+    // `output` field, dropping bash stdout (which uses `stdout`). Here
+    // both fields must propagate so doGenerate consumers see command
+    // output too.
+    const out = [
+      '{"type":"say","say":"command","text":"echo hi","partial":false}',
+      '{"type":"ask","ask":"command_output","text":"hi-output\\n","partial":false}',
+    ]
+    const result = await runOnce({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })
+    expect(result.text).toContain("[cline:execute_command] echo hi")
+    expect(result.text).toContain("hi-output")
+  })
+
+  it("ignores partial command_output events and waits for the final one to pair the bash tool-call", async () => {
+    const out = [
+      '{"type":"say","say":"command","text":"long","partial":false}',
+      '{"type":"ask","ask":"command_output","text":"part1","partial":true}',
+      '{"type":"ask","ask":"command_output","text":"part1\\npart2-final","partial":false}',
+    ]
+    const results: Array<{ stdout: string }> = []
+    for await (const ev of runStream({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })) {
+      if (ev.type === "tool-result" && ev.toolName === "bash") {
+        results.push({
+          stdout: typeof ev.result["stdout"] === "string" ? (ev.result["stdout"] as string) : "",
+        })
+      }
+    }
+    // Exactly ONE tool-result, sourced from the FINAL event (not the partial).
+    expect(results).toHaveLength(1)
+    expect(results[0]!.stdout).toBe("part1\npart2-final")
+  })
+
+  it("flushes a pending bash tool-call on stream END so the tool-result is never orphaned", async () => {
+    // cline emits the command but exits before the ask.command_output
+    // (subprocess crash, timeout, abort). The runner must still close
+    // out the bash tool-call so opencode's session processor doesn't
+    // see a tool-call without a matching tool-result.
+    const out = [
+      '{"type":"say","say":"command","text":"sleep 100","partial":false}',
+      // no ask.command_output — stream just ends
+    ]
+    let callId: string | null = null
+    let resultPaired = false
+    for await (const ev of runStream({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })) {
+      if (ev.type === "tool-call" && ev.toolName === "bash") callId = ev.toolCallId
+      if (ev.type === "tool-result" && ev.toolName === "bash" && ev.toolCallId === callId) {
+        resultPaired = true
+      }
+    }
+    expect(callId).not.toBeNull()
+    expect(resultPaired).toBe(true)
+  })
+
+  it("pairs back-to-back say.command events with their respective ask.command_output (no orphaned bash result)", async () => {
+    // Stress test the pendingBashCall race-guard: two commands fire
+    // without an intervening output; the runner must close the first
+    // one with an empty stdout BEFORE arming the second, then attach
+    // the next output to the second call (not the first).
+    const out = [
+      '{"type":"say","say":"command","text":"echo one","partial":false}',
+      '{"type":"say","say":"command","text":"echo two","partial":false}',
+      '{"type":"ask","ask":"command_output","text":"two-output\\n","partial":false}',
+    ]
+    const calls: Array<{ id: string; cmd: string }> = []
+    const results: Array<{ id: string; stdout: string }> = []
+    for await (const ev of runStream({
+      prompt: "ignored",
+      options: { command: "cline", timeoutMs: 5000 },
+      spawnFn: fakeSpawn(out),
+    })) {
+      if (ev.type === "tool-call" && ev.toolName === "bash") {
+        calls.push({
+          id: ev.toolCallId,
+          cmd: typeof ev.input["command"] === "string" ? (ev.input["command"] as string) : "",
+        })
+      }
+      if (ev.type === "tool-result" && ev.toolName === "bash") {
+        results.push({
+          id: ev.toolCallId,
+          stdout: typeof ev.result["stdout"] === "string" ? (ev.result["stdout"] as string) : "",
+        })
+      }
+    }
+    expect(calls.map((c) => c.cmd)).toEqual(["echo one", "echo two"])
+    // First call closed with empty stdout when second arrived; second
+    // received the actual output.
+    expect(results).toHaveLength(2)
+    expect(results[0]!.id).toBe(calls[0]!.id)
+    expect(results[0]!.stdout).toBe("")
+    expect(results[1]!.id).toBe(calls[1]!.id)
+    expect(results[1]!.stdout).toBe("two-output\n")
+  })
 })
 
 // ─── ClineLanguageModel tests ────────────────────────────────────────────────
@@ -838,6 +944,460 @@ describe("ClineLanguageModel", () => {
     const passthrough = new ClineLanguageModel("default", { mode: "passthrough" })
     const fakeOpts = { prompt: [{ role: "user", content: "hi" }] } as unknown as Parameters<typeof passthrough.doStream>[0]
     await expect(passthrough.doStream(fakeOpts)).rejects.toThrow(/Passthrough mode not yet implemented/)
+  })
+
+  it("doGenerate converts opencode-call tags into tool-call content when the tool is registered", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-tool-generate-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        // skill tool's actual input shape per opencode-ai 1.14.x is { name }
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: '<opencode-call name=\"skill\">{\"name\":\"code-review\"}</opencode-call>', partial: false }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [{ role: "user", content: "review" }],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+
+      expect(result.finishReason.unified).toBe("tool-calls")
+      expect(result.content).toHaveLength(1)
+      expect(result.content[0]).toMatchObject({
+        type: "tool-call",
+        toolName: "skill",
+        input: JSON.stringify({ name: "code-review" }),
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doGenerate leaves opencode-call tags as text when the tool is not registered", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-tool-unregistered-"))
+    const fakeCline = join(dir, "cline")
+    const tag = '<opencode-call name="skill">{"name":"code-review"}</opencode-call>'
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        `process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: ${JSON.stringify(tag)}, partial: false }) + '\\n')`,
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [{ role: "user", content: "review" }],
+        tools: [{ type: "function", name: "task" }],
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+
+      expect(result.finishReason.unified).toBe("stop")
+      expect(result.content).toEqual([{ type: "text", text: tag }])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doStream converts streamed opencode-call tags into tool-call events", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-tool-stream-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        "const parts = ['before ', '<opencode-', 'call name=\"skill\">{\"name\":\"code-review\"}</opencode-call>', ' after']",
+        "for (const text of parts) process.stdout.write(JSON.stringify({ type: 'say', say: 'text', text, partial: true }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const streamResult = await model.doStream({
+        prompt: [{ role: "user", content: "review" }],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doStream>[0])
+      const reader = streamResult.stream.getReader()
+      const events: unknown[] = []
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        events.push(value)
+      }
+
+      expect(events).toContainEqual(expect.objectContaining({ type: "tool-call", toolName: "skill", input: JSON.stringify({ name: "code-review" }) }))
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "finish",
+        finishReason: { unified: "tool-calls", raw: undefined },
+        providerMetadata: { cline: expect.objectContaining({ opencodeCalls: 1 }) },
+      }))
+      const text = events
+        .filter((event): event is { type: "text-delta"; delta: string } =>
+          typeof event === "object" && event !== null && (event as { type?: unknown }).type === "text-delta",
+        )
+        .map((event) => event.delta)
+        .join("")
+      expect(text).toBe("before  after")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doStream flushes a buffered partial tag as text when cline errors out mid-tag", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-tool-error-flush-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        // Emit a partial-open marker via say.text, then crash with non-zero exit.
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'text', text: 'lead-up <opencode-', partial: true }) + '\\n')",
+        "process.exit(7)",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const streamResult = await model.doStream({
+        prompt: [{ role: "user", content: "go" }],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doStream>[0])
+      const reader = streamResult.stream.getReader()
+      const deltas: string[] = []
+      let errorSeen = false
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value === undefined) continue
+        const v = value as { type: string; delta?: string }
+        if (v.type === "text-delta" && typeof v.delta === "string") deltas.push(v.delta)
+        if (v.type === "error") errorSeen = true
+      }
+      expect(errorSeen).toBe(true)
+      // The full "lead-up <opencode-" must reach the consumer — none of it
+      // may be silently dropped just because the open-marker prefix was
+      // mid-flight when cline crashed.
+      expect(deltas.join("")).toContain("lead-up <opencode-")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doGenerate bypasses cline and dispatches a skill tool-call when a slash-command instruction is present", async () => {
+    // Use a sentinel fakeCline that would FAIL if invoked — proving the
+    // bypass actually short-circuits before cline is spawned.
+    const dir = mkdtempSync(join(tmpdir(), "cline-skill-bypass-"))
+    const fakeCline = join(dir, "cline-must-not-run")
+    writeFileSync(fakeCline, "#!/usr/bin/env bash\nexit 99\n", "utf8")
+    chmodSync(fakeCline, 0o755)
+
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<command-instruction>\nRun the `karpathy-guidelines` skill workflow on the user's request.\n</command-instruction>\n\nReview install.sh.",
+              },
+            ],
+          },
+        ],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+
+      expect(result.finishReason).toMatchObject({ unified: "tool-calls" })
+      expect(result.content).toHaveLength(1)
+      expect(result.content[0]).toMatchObject({
+        type: "tool-call",
+        toolName: "skill",
+        input: JSON.stringify({ name: "karpathy-guidelines" }),
+      })
+      expect(
+        (result.providerMetadata?.["cline"] as { skillSlashBypass?: string })?.skillSlashBypass,
+      ).toBe("karpathy-guidelines")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doStream bypasses cline and dispatches a skill tool-call for a slash command", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-skill-bypass-stream-"))
+    const fakeCline = join(dir, "cline-must-not-run")
+    writeFileSync(fakeCline, "#!/usr/bin/env bash\nexit 99\n", "utf8")
+    chmodSync(fakeCline, 0o755)
+
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const streamResult = await model.doStream({
+        prompt: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<command-instruction>\nRun the `code-review` skill workflow on the user's request.\n</command-instruction>\n\nReview my changes.",
+              },
+            ],
+          },
+        ],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doStream>[0])
+
+      const reader = streamResult.stream.getReader()
+      const events: unknown[] = []
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        events.push(value)
+      }
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "tool-call",
+          toolName: "skill",
+          input: JSON.stringify({ name: "code-review" }),
+        }),
+      )
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "finish",
+          finishReason: { unified: "tool-calls", raw: "skill-slash-bypass" },
+        }),
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("does NOT re-dispatch a skill that was already loaded earlier in the conversation (loop guard)", async () => {
+    // codex P1 regression: after the slash bypass emits a skill tool-call,
+    // opencode runs the skill and re-enters us with the ORIGINAL user
+    // message (still carrying <command-instruction>) PLUS a new tool-
+    // result. If we don't notice the prior dispatch we re-emit the same
+    // skill tool-call — infinite loop. The guard must see the prior
+    // <tool-call name="skill"> in the handoff and fall through to cline.
+    const dir = mkdtempSync(join(tmpdir(), "cline-loop-guard-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: 'follow-up answer', partial: false }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<command-instruction>\nRun the `karpathy-guidelines` skill workflow on the user's request.\n</command-instruction>\nDo the thing.",
+              },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                args: { name: "karpathy-guidelines" },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                output: { name: "karpathy-guidelines", loaded: true },
+              },
+            ],
+          },
+        ],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+
+      // Bypass MUST NOT fire again — normal cline flow finished with stop.
+      expect(result.finishReason).toMatchObject({ unified: "stop" })
+      expect(result.content[0]).toMatchObject({ type: "text", text: "follow-up answer" })
+      const meta = result.providerMetadata?.["cline"] as
+        | { skillBypassSource?: string; skillSlashBypass?: string }
+        | undefined
+      expect(meta?.skillBypassSource).toBeUndefined()
+      expect(meta?.skillSlashBypass).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("DOES dispatch a DIFFERENT skill in the same conversation (loop guard is name-specific)", async () => {
+    // The guard must only block the EXACT skill name that was already
+    // dispatched. A second, different slash command in the same chat
+    // should still bypass cleanly.
+    const dir = mkdtempSync(join(tmpdir(), "cline-loop-guard-chain-"))
+    const fakeCline = join(dir, "cline-must-not-run")
+    writeFileSync(fakeCline, "#!/usr/bin/env bash\nexit 99\n", "utf8")
+    chmodSync(fakeCline, 0o755)
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [
+          { role: "user", content: "/karpathy" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                args: { name: "karpathy-guidelines" },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                output: { name: "karpathy-guidelines", loaded: true },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<command-instruction>\nRun the `code-review` skill workflow on the user's request.\n</command-instruction>",
+              },
+            ],
+          },
+        ],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+
+      // Different skill — must dispatch.
+      expect(result.finishReason).toMatchObject({ unified: "tool-calls" })
+      expect(result.content[0]).toMatchObject({
+        type: "tool-call",
+        toolName: "skill",
+        input: JSON.stringify({ name: "code-review" }),
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("does NOT bypass when the `skill` tool isn't registered (falls through to normal cline flow)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-skill-no-bypass-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: 'normal cline output', partial: false }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<command-instruction>\nRun the `code-review` skill workflow on the user's request.\n</command-instruction>",
+              },
+            ],
+          },
+        ],
+        tools: [{ type: "function", name: "task" }], // no skill — bypass must NOT fire
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+      expect(result.finishReason).toMatchObject({ unified: "stop" })
+      expect(result.content[0]).toMatchObject({ type: "text", text: "normal cline output" })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("bridges cline's execute_command to opencode bash with stdout result", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cline-bash-bridge-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'command', text: 'echo hello', partial: false }) + '\\n')",
+        "process.stdout.write(JSON.stringify({ type: 'ask', ask: 'command_output', text: 'hello\\n', partial: false }) + '\\n')",
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: 'done', partial: false }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const streamResult = await model.doStream({
+        prompt: [{ role: "user", content: "run echo" }],
+      } as unknown as Parameters<typeof model.doStream>[0])
+      const reader = streamResult.stream.getReader()
+      const events: unknown[] = []
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        events.push(value)
+      }
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "tool-call",
+          toolName: "bash",
+          input: JSON.stringify({ command: "echo hello" }),
+        }),
+      )
+      const toolResult = events.find(
+        (e): e is { type: "tool-result"; toolName: string; result: { stdout?: string } } =>
+          typeof e === "object" &&
+          e !== null &&
+          (e as { type?: unknown }).type === "tool-result" &&
+          (e as { toolName?: unknown }).toolName === "bash",
+      )
+      expect(toolResult).toBeDefined()
+      expect(toolResult!.result).toMatchObject({ ok: true, stdout: "hello\n" })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it("writes prompt diagnostics for generate and stream calls", async () => {

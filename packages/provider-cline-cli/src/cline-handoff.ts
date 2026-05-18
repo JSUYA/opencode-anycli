@@ -1,11 +1,22 @@
+import { buildProtocolSection, type ProtocolToolDescriptor } from "./opencode-call-parser.js"
+
 export interface ClineHandoffInput {
   prompt: ReadonlyArray<unknown>
+  /**
+   * Tool descriptors from `LanguageModelV3CallOptions.tools`. We only use the
+   * `name` field, so callers may pass a partial shape. When present and a
+   * recognized tool (`task` / `skill`) is in the list, we append an
+   * `[OPENCODE_CALL_PROTOCOL]` section teaching cline the tag syntax.
+   */
+  tools?: ReadonlyArray<ProtocolToolDescriptor>
 }
 
 export interface ClineHandoffDiagnostics {
   originalBytes: number
   handoffBytes: number
   policyId: string | null
+  /** Bytes added by the OPENCODE_CALL_PROTOCOL section (0 when omitted). */
+  protocolBytes: number
   messageBreakdown: Array<{
     index: number
     role: string
@@ -17,6 +28,16 @@ export interface ClineHandoffDiagnostics {
 export interface ClineHandoffResult {
   text: string
   diagnostics: ClineHandoffDiagnostics
+  /**
+   * Command-instruction bodies extracted from the prompt's
+   * `<command-instruction>...</command-instruction>` blocks. opencode's TUI
+   * emits these whenever the user invokes a slash command (`/code-review`,
+   * `/karpathy`, etc.). The provider inspects them to decide whether to
+   * short-circuit cline and dispatch a host-side tool (typically `skill`)
+   * directly — that bypass is what makes slash commands actually load the
+   * skill content rather than getting absorbed by cline's autonomous loop.
+   */
+  commandInstructions: string[]
 }
 
 interface NormalizedMessage {
@@ -167,12 +188,22 @@ export function composeClineHandoff(input: ClineHandoffInput): ClineHandoffResul
   )
   pushSection(sections, "TOOL_OBSERVATIONS", toolMessages.map(formatMessageForContext).join("\n\n"))
   if (policyId !== null) pushSection(sections, "CONTEXT_POLICY", `id: ${policyId}`)
+  // Protocol section is appended LAST so cline's most recent instruction is
+  // "here's how to call back" — closer to the end of the prompt usually
+  // wins on attention-budget when cline streams its first tokens.
+  const protocol = input.tools ? buildProtocolSection(input.tools) : null
+  let protocolBytes = 0
+  if (protocol !== null) {
+    sections.push(protocol)
+    protocolBytes = Buffer.byteLength(protocol, "utf8")
+  }
 
   const text = sections.join("\n\n")
   const diagnostics: ClineHandoffDiagnostics = {
     originalBytes: messages.reduce((total, message) => total + message.contentBytes, 0),
     handoffBytes: Buffer.byteLength(text, "utf8"),
     policyId,
+    protocolBytes,
     messageBreakdown: messages.map((message) => ({
       index: message.index,
       role: message.role,
@@ -181,7 +212,7 @@ export function composeClineHandoff(input: ClineHandoffInput): ClineHandoffResul
     })),
   }
 
-  return { text, diagnostics }
+  return { text, diagnostics, commandInstructions }
 }
 
 function normalizeMessages(prompt: ReadonlyArray<unknown>): NormalizedMessage[] {

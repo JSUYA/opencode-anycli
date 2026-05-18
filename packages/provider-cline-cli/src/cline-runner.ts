@@ -33,6 +33,13 @@ import {
   shouldUsePromptFile,
   writePromptTempFile,
 } from "./prompt-tempfile.js"
+import {
+  bridgeClineCommandStart,
+  bridgeClineToolEvent,
+  buildCommandOutputResult,
+  type BridgedToolEvent,
+  type ClineToolPayload,
+} from "./cline-tool-bridge.js"
 import type { ClineEvent, ClineUsage, RunResult } from "./types.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
@@ -144,7 +151,7 @@ type VisibleText = {
 }
 
 /** Build the CLI arg list for cline. */
-export function buildClineArgs(prompt: string, extraArgs: readonly string[] = []): string[] {
+function buildClineArgs(prompt: string, extraArgs: readonly string[] = []): string[] {
   return ["--json", "--yolo", "--act", prompt, ...extraArgs]
 }
 
@@ -159,11 +166,22 @@ export async function runOnce(input: RunInput): Promise<RunResult> {
     if (ev.type === "text-delta") {
       finalText += ev.delta
     } else if (ev.type === "tool-call") {
-      // Render readFile tool-calls as a short textual marker so consumers
-      // that only look at result.text (doGenerate) still see what cline read.
+      // Render bridged tool-calls as a short textual marker so consumers
+      // that only look at result.text (doGenerate) still see what cline did.
       finalText += renderToolCallAsText(ev) ?? ""
     } else if (ev.type === "tool-result") {
-      // No additional text — the tool-call line above already named the file.
+      // Forward captured output (search hits, command stdout, …) so
+      // runOnce text consumers retain the body that earlier versions of
+      // the runner inlined via the legacy formatToolText path.
+      //   - bash stores its captured stdout under `stdout`
+      //   - grep / glob store their hit body under `output`
+      // We accept either field name so neither path silently drops the body.
+      const body =
+        (typeof ev.result["output"] === "string" ? (ev.result["output"] as string) : null) ??
+        (typeof ev.result["stdout"] === "string" ? (ev.result["stdout"] as string) : null)
+      if (body !== null && body.length > 0) {
+        finalText += body.endsWith("\n") ? body : body + "\n"
+      }
     } else if (ev.type === "finish") {
       usage = ev.usage
       parseErrors = ev.parseErrors
@@ -179,14 +197,59 @@ export async function runOnce(input: RunInput): Promise<RunResult> {
 }
 
 function renderToolCallAsText(ev: { toolName: string; input: Record<string, unknown> }): string | null {
-  if (ev.toolName !== CLINE_READ_TOOL_NAME) return null
-  const filePath = typeof ev.input["filePath"] === "string" ? (ev.input["filePath"] as string) : null
-  if (!filePath) return null
-  const start = typeof ev.input["offset"] === "number" ? (ev.input["offset"] as number) : undefined
-  const limit = typeof ev.input["limit"] === "number" ? (ev.input["limit"] as number) : undefined
-  const end = start !== undefined && limit !== undefined ? start + limit - 1 : undefined
-  const range = start !== undefined ? (end !== undefined && end !== start ? `:${start}-${end}` : `:${start}`) : ""
-  return `[cline:readFile] ${filePath}${range}\n`
+  // Read (a.k.a. readFile in cline's legacy schema) keeps its historical
+  // marker form so downstream consumers that parse it stay compatible.
+  if (ev.toolName === CLINE_READ_TOOL_NAME) {
+    const filePath = typeof ev.input["filePath"] === "string" ? (ev.input["filePath"] as string) : null
+    if (!filePath) return null
+    const start = typeof ev.input["offset"] === "number" ? (ev.input["offset"] as number) : undefined
+    const limit = typeof ev.input["limit"] === "number" ? (ev.input["limit"] as number) : undefined
+    const end = start !== undefined && limit !== undefined ? start + limit - 1 : undefined
+    const range = start !== undefined ? (end !== undefined && end !== start ? `:${start}-${end}` : `:${start}`) : ""
+    return `[cline:readFile] ${filePath}${range}\n`
+  }
+  // For other bridged tools, surface a one-line marker that names the
+  // tool and its primary input. opencode UI ignores this text path
+  // (it consumes the structured tool-call event); but runOnce / doGenerate
+  // consumers that only look at the aggregated `.text` get a useful
+  // breadcrumb instead of silent omission.
+  const headerByName: Record<string, (input: Record<string, unknown>) => string | null> = {
+    bash: (input) => {
+      const cmd = typeof input["command"] === "string" ? (input["command"] as string) : null
+      return cmd ? `[cline:execute_command] ${cmd}\n` : null
+    },
+    grep: (input) => {
+      const path = typeof input["path"] === "string" ? (input["path"] as string) : "."
+      return `[cline:searchFiles] ${path}\n`
+    },
+    glob: (input) => {
+      const pattern = typeof input["pattern"] === "string" ? (input["pattern"] as string) : null
+      return pattern ? `[cline:listFiles] ${pattern}\n` : null
+    },
+    write: (input) => {
+      const filePath = typeof input["filePath"] === "string" ? (input["filePath"] as string) : null
+      return filePath ? `[cline:writeToFile] ${filePath}\n` : null
+    },
+    edit: (input) => {
+      const filePath = typeof input["filePath"] === "string" ? (input["filePath"] as string) : null
+      return filePath ? `[cline:replaceInFile] ${filePath}\n` : null
+    },
+    webfetch: (input) => {
+      const url = typeof input["url"] === "string" ? (input["url"] as string) : null
+      return url ? `[cline:web_fetch] ${url}\n` : null
+    },
+    websearch: (input) => {
+      const query = typeof input["query"] === "string" ? (input["query"] as string) : null
+      return query ? `[cline:web_search] ${query}\n` : null
+    },
+  }
+  const render = headerByName[ev.toolName]
+  if (render) return render(ev.input)
+  // Unknown / unmapped (cline:<name> passthrough) — render a generic marker.
+  if (ev.toolName.startsWith("cline:")) {
+    return `[${ev.toolName}]\n`
+  }
+  return null
 }
 
 /** Streaming runner — yields incremental text deltas. */
@@ -281,7 +344,13 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
     if (DEBUG) process.stderr.write(`[cline-runner] aborted — killing pid ${child.pid}\n`)
     child.kill("SIGTERM")
   }
-  signal?.addEventListener("abort", onAbort)
+  // Race: opencode can hand us a signal that's ALREADY aborted (e.g. user
+  // hit Ctrl+C during the flatten step before we got the chance to spawn).
+  // The DOM AbortSignal contract is that listeners attached AFTER abort
+  // never fire — so we'd silently let cline run to completion. Inspect
+  // the flag and trip the kill path immediately instead.
+  if (signal?.aborted) onAbort()
+  else signal?.addEventListener("abort", onAbort)
 
   // Drain stderr to a debug log; we don't surface it as an error unless cline exits non-zero.
   const stderrChunks: string[] = []
@@ -372,6 +441,13 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // Track readFile tool-calls we've already surfaced so partial→final
   // updates don't double-emit. Key: file path that goes into the call.
   const emittedReads = new Set<string>()
+  // Track the most recent bash tool-call so we can attach the matching
+  // ask.command_output to it. cline emits the command via say.command,
+  // then the output via ask.command_output — they are not joined in a
+  // single event, so we pair them by ORDER. Mid-run cline can interleave
+  // other tool events between command and output (rare), so we only hold
+  // ONE pending entry at a time and drop it if a second bash comes in.
+  let pendingBashCall: { toolCallId: string; toolName: string } | null = null
 
   function handleEvent(ev: ClineEvent) {
     if (isTaskStarted(ev)) {
@@ -488,31 +564,100 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       }
       return
     }
-    // Surface cline's readFile activity as a structured tool-call so opencode's
-    // generic tool-part renderer can list it for the user. Skip partials —
-    // the path doesn't stream incrementally and emitting on each partial
-    // would duplicate the entry.
-    const readCall = pickReadFileCall(ev)
-    if (readCall !== null) {
+    // Bridge cline's NATIVE tool activity to opencode V3 tool-call/result
+    // parts. Three event paths feed in:
+    //   1. say.tool with a JSON body — covers readFile, write_to_file,
+    //      replace_in_file, search_files, list_files, web_fetch, …
+    //   2. say.command with a raw shell string — execute_command
+    //   3. ask.command_output — paired output for the most recent command
+    // See cline-tool-bridge.ts for the full forward-compat alias table.
+    const bridged = pickBridgedTool(ev)
+    if (bridged !== null) {
       if (isPartial(ev)) return
-      // Suppress reads of our own spill file — it's an implementation detail
-      // (we wrote it and pointed cline at it; the user never asked for it).
-      // Without this filter the path leaks into runOnce's text and shows up
-      // as a phantom "Read /tmp/opencode-anycli-prompts/..." entry in the
-      // session timeline.
-      if (tempPromptFile !== null && readCall.filePath === tempPromptFile) return
-      if (emittedReads.has(readCall.filePath)) return
-      emittedReads.add(readCall.filePath)
-      const toolCallId = `cline-read-${randomUUID()}`
-      const input: Record<string, unknown> = { filePath: readCall.filePath }
-      if (readCall.offset !== undefined) input["offset"] = readCall.offset
-      if (readCall.limit !== undefined) input["limit"] = readCall.limit
-      enqueue({ type: "tool-call", toolCallId, toolName: CLINE_READ_TOOL_NAME, input })
+      // Unknown / unmapped cline tool — opencode would silently drop a
+      // tool-call whose name isn't in its registry (verified via session
+      // inspection; see CLINE_READ_TOOL_NAME comment above). Surface it
+      // as a text marker instead so the activity is at least visible to
+      // the user and runOnce text consumers, until we add the alias to
+      // the bridge map.
+      if (bridged.toolName.startsWith("cline:")) {
+        const marker = renderToolCallAsText({
+          toolName: bridged.toolName,
+          input: bridged.input,
+        })
+        if (marker !== null) emitTextIfNew("assistant", (emittedByChannel.get("assistant") ?? "") + marker)
+        return
+      }
+      // Suppress reads of our own spill file — it's an implementation
+      // detail (we wrote it and pointed cline at it). Without this filter
+      // the path leaks into runOnce's text and shows up as a phantom
+      // "Read /tmp/opencode-anycli-prompts/..." entry in the timeline.
+      if (
+        bridged.toolName === "read" &&
+        tempPromptFile !== null &&
+        bridged.input["filePath"] === tempPromptFile
+      ) {
+        return
+      }
+      // De-dupe read by filePath only (cline emits partial→final pairs).
+      // Other tools may legitimately repeat (multiple greps, multiple
+      // bash commands) so we don't gate them.
+      if (bridged.toolName === "read") {
+        const fp = typeof bridged.input["filePath"] === "string" ? bridged.input["filePath"] : null
+        if (fp !== null) {
+          if (emittedReads.has(fp)) return
+          emittedReads.add(fp)
+        }
+      }
+      const toolCallId = `cline-${bridged.toolName}-${randomUUID()}`
+      enqueue({
+        type: "tool-call",
+        toolCallId,
+        toolName: bridged.toolName,
+        input: bridged.input,
+      })
+      // For bash we DON'T finalize the result here — we wait for the
+      // matching ask.command_output below, which carries stdout + exit.
+      //
+      // Race guard: if a previous bash call is still pending when a new
+      // one arrives (no intervening ask.command_output), close out the
+      // old one with an empty result so it doesn't dangle. Otherwise the
+      // NEXT ask.command_output would mis-pair with the stale id and
+      // attach the new command's stdout to the previous tool-call.
+      if (bridged.toolName === "bash") {
+        if (pendingBashCall !== null) {
+          enqueue({
+            type: "tool-result",
+            toolCallId: pendingBashCall.toolCallId,
+            toolName: pendingBashCall.toolName,
+            result: { ok: true, stdout: "" },
+          })
+        }
+        pendingBashCall = { toolCallId, toolName: bridged.toolName }
+        return
+      }
       enqueue({
         type: "tool-result",
         toolCallId,
-        toolName: CLINE_READ_TOOL_NAME,
-        result: { ok: true, filePath: readCall.filePath },
+        toolName: bridged.toolName,
+        result: bridged.result,
+        isError: !bridged.ok,
+      })
+      return
+    }
+    // Pair a pending bash tool-call with its captured stdout. cline emits
+    // ask.command_output after the say.command that initiated the run.
+    const cmdOutput = pickCommandOutput(ev)
+    if (cmdOutput !== null && pendingBashCall !== null) {
+      const { toolCallId, toolName } = pendingBashCall
+      pendingBashCall = null
+      const { result, ok } = buildCommandOutputResult(cmdOutput.text, cmdOutput.exitCode)
+      enqueue({
+        type: "tool-result",
+        toolCallId,
+        toolName,
+        result,
+        isError: !ok,
       })
       return
     }
@@ -561,6 +706,26 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
         continue
       }
       handleEvent(ev)
+    }
+    // Close out any bash tool-call still waiting for its ask.command_output.
+    // Happens when cline exits (clean or crashed) before the command output
+    // landed — without this we'd leave a tool-call dangling without a
+    // matching tool-result, which opencode's session processor rejects.
+    if (pendingBashCall !== null) {
+      const { toolCallId, toolName } = pendingBashCall
+      pendingBashCall = null
+      const isError = killReason !== null || (code !== null && code !== 0)
+      enqueue({
+        type: "tool-result",
+        toolCallId,
+        toolName,
+        result: {
+          ok: !isError,
+          stdout: "",
+          ...(isError ? { error: "cline exited before command output arrived" } : {}),
+        },
+        isError,
+      })
     }
     const stderrTail = stderrChunks.join("").slice(-1000)
     const stderrSuffix = stderrTail ? ` stderr tail:\n${stderrTail}` : ""
@@ -657,7 +822,7 @@ function wrapErr(err: unknown, prefix: string): Error {
  * tooling that wraps it) can render an accurate `%` even when the static
  * config disagrees with cline's actual upstream model.
  */
-export function parseContextWindowBanner(
+function parseContextWindowBanner(
   text: string | null,
 ): { used: number; max: number | undefined } | null {
   if (text === null || text.length === 0) return null
@@ -917,14 +1082,27 @@ function clineDataDir(options: RunInput["options"]): string {
   return join(home, ".cline", "data")
 }
 
-interface ReadFileCall {
-  filePath: string
-  offset?: number
-  limit?: number
-}
-
-function pickReadFileCall(ev: ClineEvent): ReadFileCall | null {
+/**
+ * Recognize any cline tool event we know how to bridge. Covers:
+ *   - say.tool with JSON body — readFile/write/edit/grep/list/etc.
+ *   - say.command with raw shell text — execute_command
+ * Returns null when the event isn't a tool invocation or isn't recognized.
+ *
+ * The bridging table lives in cline-tool-bridge.ts. Forward-compat: unknown
+ * tools fall through as `cline:<name>` so we don't lose visibility when
+ * cline adds new tool names — no provider release needed.
+ */
+function pickBridgedTool(ev: ClineEvent): BridgedToolEvent | null {
   const say = eventKind(ev, "say")
+  // 1. say.command — raw shell invocation. cline emits one of these per
+  //    execute_command. The command output arrives in a subsequent
+  //    ask.command_output, handled separately by pickCommandOutput.
+  if (say === "command") {
+    const text = pickText(ev)
+    if (text === null || text.length === 0) return null
+    return bridgeClineCommandStart(text)
+  }
+  // 2. say.tool — JSON-encoded tool invocation.
   if (say !== "tool") return null
   const text = pickText(ev)
   if (text === null) return null
@@ -935,18 +1113,51 @@ function pickReadFileCall(ev: ClineEvent): ReadFileCall | null {
     return null
   }
   if (!isRecord(parsed)) return null
-  if (pickString(parsed, "tool") !== "readFile") return null
-  // cline emits both a workspace-relative `path` and a resolved absolute
-  // `content`. Prefer the absolute form so opencode's tool-part renderer
-  // shows an unambiguous path; fall back to the relative one.
-  const filePath = pickString(parsed, "content") ?? pickString(parsed, "path")
-  if (!filePath) return null
-  const start = pickNumber(parsed, ["readLineStart"])
-  const end = pickNumber(parsed, ["readLineEnd"])
-  const result: ReadFileCall = { filePath }
-  if (start !== undefined) result.offset = start
-  if (start !== undefined && end !== undefined && end >= start) result.limit = end - start + 1
-  return result
+  return bridgeClineToolEvent(parsed as ClineToolPayload)
+}
+
+/**
+ * Recognize cline's command-output ask event. Returns the raw stdout +
+ * exit code so the most recent bash tool-call can be finalized with a
+ * real result body.
+ */
+function pickCommandOutput(ev: ClineEvent): { text: string; exitCode?: number } | null {
+  const ask = eventKind(ev, "ask")
+  if (ask !== "command_output") return null
+  // Skip partial chunks: cline streams command output incrementally and
+  // emits a final `partial:false` event at the end. Closing pendingBashCall
+  // on a partial would leave the final output unpaired and orphan the rest
+  // of the stdout, so we wait for the final event before pairing.
+  if (isPartial(ev)) return null
+  const text = pickText(ev)
+  if (text === null) return null
+  // Some cline versions embed exit code in a JSON envelope; others ship
+  // raw stdout. Try JSON first and fall back to plain text.
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (isRecord(parsed)) {
+      const stdout =
+        (typeof parsed["stdout"] === "string" ? (parsed["stdout"] as string) : null) ??
+        (typeof parsed["output"] === "string" ? (parsed["output"] as string) : null)
+      const exitCode =
+        typeof parsed["exitCode"] === "number"
+          ? (parsed["exitCode"] as number)
+          : typeof parsed["code"] === "number"
+            ? (parsed["code"] as number)
+            : undefined
+      // Preserve exitCode even when stdout is absent (`{exitCode: 1}`
+      // alone means the command failed silently). Without this, a
+      // command that exits non-zero with empty stdout was reported as
+      // ok:true by buildCommandOutputResult.
+      if (stdout !== null) {
+        return exitCode === undefined ? { text: stdout } : { text: stdout, exitCode }
+      }
+      if (exitCode !== undefined) return { text: "", exitCode }
+    }
+  } catch {
+    /* not JSON — use raw text */
+  }
+  return { text }
 }
 
 function pickVisibleText(ev: ClineEvent): VisibleText | null {

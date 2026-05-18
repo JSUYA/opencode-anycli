@@ -1,0 +1,396 @@
+// Bridge: cline-native tool events → opencode V3 tool-call/result parts.
+//
+// cline runs an autonomous agent loop with its OWN tool inventory (readFile,
+// execute_command, search_files, etc.). When opencode is the host, those
+// tool invocations are otherwise invisible — the user sees only the final
+// text. This module translates cline's NDJSON tool events into opencode's
+// V3 stream protocol so the host UI can render them as first-class tool
+// calls, AND so subsequent host-side processing (LSP touchFile, permission
+// checks, session metadata) actually fires.
+//
+// Design tenets:
+//
+//   1. Forward-compatible: cline's tool names have churned across releases
+//      (camelCase ↔ snake_case, renames, additions). Every mapping entry
+//      lists every alias we've ever observed; unknown tools fall through
+//      as a generic `cline:<name>` tool-call so opencode still shows the
+//      activity without us having to ship a new release for every cline
+//      rename.
+//
+//   2. Provider-executed: cline already ran the tool. We emit the call so
+//      the UI knows about it, then we emit the result with the captured
+//      output. The host MUST NOT re-execute — see CLINE_PROVIDER_EXECUTED
+//      flag handling in the runner.
+//
+//   3. Schema-tolerant: cline payloads can be JSON (say.tool's text is a
+//      JSON blob) or plain strings (say.command's text is the shell line).
+//      Each transform accepts the raw shape and projects to a minimal
+//      opencode input. Missing fields are absent rather than reverse-
+//      engineered — we never invent paths or commands.
+//
+//   4. Backward-compatible: the legacy single-tool path
+//      (`pickReadFileCall` + `CLINE_READ_TOOL_NAME = "read"` in
+//      cline-runner.ts) remains the canonical readFile-only fast path so
+//      existing consumers see no regression. The bridge here is additive.
+
+/**
+ * Lookup of all cline tool aliases we've observed across cline versions,
+ * mapping to the matching opencode tool name. Aliases are compared after
+ * lower-casing AND collapsing `_` / `-` so historic and current spellings
+ * resolve identically.
+ *
+ * When you find a NEW cline tool name in a future release, add it here —
+ * everything else (runner, language-model, tests) picks the new alias up
+ * automatically through the resolver below.
+ */
+const CLINE_TO_OPENCODE_ALIASES: Record<string, string> = {
+  // File reading
+  readfile: "read",
+  read_file: "read",
+  read: "read",
+
+  // File writing (new file or full overwrite)
+  writetofile: "write",
+  write_to_file: "write",
+  write_file: "write",
+  writefile: "write",
+  write: "write",
+  newfile: "write",
+  new_file: "write",
+  createfile: "write",
+  create_file: "write",
+
+  // File editing (in-place patch)
+  replaceinfile: "edit",
+  replace_in_file: "edit",
+  applydiff: "edit",
+  apply_diff: "edit",
+  edit_file: "edit",
+  editfile: "edit",
+  edit: "edit",
+  patch_file: "edit",
+
+  // Shell
+  executecommand: "bash",
+  execute_command: "bash",
+  exec_command: "bash",
+  bash: "bash",
+  shell: "bash",
+  command: "bash",
+  run_command: "bash",
+
+  // Directory listing
+  listfiles: "glob",
+  list_files: "glob",
+  ls: "glob",
+  list_dir: "glob",
+  list_directory: "glob",
+  glob: "glob",
+
+  // Code search
+  searchfiles: "grep",
+  search_files: "grep",
+  search: "grep",
+  grep: "grep",
+  ripgrep: "grep",
+
+  // Web
+  webfetch: "webfetch",
+  web_fetch: "webfetch",
+  fetch_url: "webfetch",
+  fetch: "webfetch",
+
+  websearch: "websearch",
+  web_search: "websearch",
+}
+
+/** Normalize a cline tool name for alias lookup. */
+export function normalizeClineToolName(raw: string): string {
+  return raw.toLowerCase().replace(/[_\-]/g, "")
+}
+
+/** Resolve a cline tool name to an opencode tool name, or null when unknown. */
+export function resolveOpencodeTool(clineName: string): string | null {
+  const key = normalizeClineToolName(clineName)
+  return CLINE_TO_OPENCODE_ALIASES[key] ?? null
+}
+
+/** Source shape for a cline `say.tool` event after JSON-decoding its `text`. */
+export interface ClineToolPayload {
+  tool?: unknown
+  // readFile / read_file
+  path?: unknown
+  content?: unknown
+  readLineStart?: unknown
+  readLineEnd?: unknown
+  // write_to_file
+  // (uses path + content)
+  // replace_in_file / apply_diff
+  diff?: unknown
+  // search_files
+  regex?: unknown
+  filePattern?: unknown
+  file_pattern?: unknown
+  // list_files
+  recursive?: unknown
+  // browser/MCP/web — captured opaquely
+  [key: string]: unknown
+}
+
+/** Result emitted to the V3 stream — both tool-call and tool-result halves. */
+export interface BridgedToolEvent {
+  /** opencode tool name (lowercase, matches LanguageModelV3FunctionTool.name). */
+  toolName: string
+  /** opencode-shaped input parameters. */
+  input: Record<string, unknown>
+  /**
+   * Synthetic result payload to emit alongside the call. cline already ran
+   * the tool, so we surface the OUTPUT here. The host MUST treat this
+   * tool-call as provider-executed and skip re-running it.
+   */
+  result: Record<string, unknown>
+  /**
+   * When true, the cline-side execution finished successfully. When false
+   * (e.g. command exit-code non-zero), the result is marked `isError`.
+   */
+  ok: boolean
+  /**
+   * Free-form passthrough name kept for telemetry — the originating cline
+   * name BEFORE alias resolution. Lets opencode logs trace back to which
+   * cline schema produced this entry.
+   */
+  originalClineName: string
+}
+
+/**
+ * Bridge a cline `say.tool` payload (already JSON-parsed from say.tool.text)
+ * to an opencode tool-call+result pair. Returns `null` when the payload
+ * lacks a recognizable `tool` field.
+ *
+ * Unknown tools (no alias entry) fall through as `cline:<original>` so the
+ * UI still surfaces the activity. Forward-compat lever for cline renames.
+ */
+export function bridgeClineToolEvent(payload: ClineToolPayload): BridgedToolEvent | null {
+  const rawName = typeof payload.tool === "string" ? payload.tool : null
+  if (rawName === null) return null
+
+  const opencodeName = resolveOpencodeTool(rawName)
+  const handler = opencodeName !== null ? TOOL_TRANSFORMS[opencodeName] : null
+
+  if (handler) return handler(payload, rawName)
+
+  // Unknown / unmapped tool — surface as cline:<name> so the activity isn't
+  // silently dropped. Forward-compat fallback for cline tool additions.
+  return {
+    toolName: `cline:${rawName}`,
+    input: pickPassthroughInput(payload),
+    result: { ok: true },
+    ok: true,
+    originalClineName: rawName,
+  }
+}
+
+/**
+ * Bridge a cline `say.command` event (raw shell command text) to an
+ * opencode `bash` tool-call. The output is supplied separately via
+ * `attachCommandOutput` once the matching `ask.command_output` event
+ * arrives — call sites pair them via emission order in cline-runner.
+ */
+export function bridgeClineCommandStart(commandText: string): BridgedToolEvent {
+  return {
+    toolName: "bash",
+    input: { command: commandText },
+    result: { ok: true },
+    ok: true,
+    originalClineName: "execute_command",
+  }
+}
+
+/**
+ * Build the tool-result payload for a previously emitted `bash` tool-call
+ * once the corresponding command output arrives. Caller is responsible
+ * for matching toolCallId — this function only formats the result body.
+ */
+export function buildCommandOutputResult(output: string, exitCode?: number): {
+  result: Record<string, unknown>
+  ok: boolean
+} {
+  const ok = exitCode === undefined ? true : exitCode === 0
+  const result: Record<string, unknown> = {
+    ok,
+    stdout: output,
+  }
+  if (exitCode !== undefined) result["exitCode"] = exitCode
+  return { result, ok }
+}
+
+// ─── Per-tool transforms ─────────────────────────────────────────────────────
+
+type Transform = (raw: ClineToolPayload, originalName: string) => BridgedToolEvent
+
+const TOOL_TRANSFORMS: Record<string, Transform> = {
+  read: (raw, original) => {
+    // cline emits both `path` (workspace-relative) and `content` (absolute
+    // resolved). Prefer absolute so opencode's read tool resolves the
+    // correct file without depending on the host's cwd.
+    const filePath = pickString(raw.content) ?? pickString(raw.path)
+    const start = pickNumber(raw.readLineStart)
+    const end = pickNumber(raw.readLineEnd)
+    const input: Record<string, unknown> = {}
+    if (filePath !== null) input["filePath"] = filePath
+    if (start !== null) input["offset"] = start
+    if (start !== null && end !== null && end >= start) input["limit"] = end - start + 1
+    return {
+      toolName: "read",
+      input,
+      result: { ok: true, filePath: filePath ?? undefined },
+      ok: true,
+      originalClineName: original,
+    }
+  },
+  write: (raw, original) => {
+    // For write_to_file, `path` is the workspace-relative filename and
+    // `content` is the file BODY. Unlike readFile (where cline overloads
+    // `content` to carry the absolute path), write never puts the path
+    // there — so we prefer `path` strictly and treat `content` as body.
+    const filePath = pickString(raw.path)
+    const content = pickString(raw["content"])
+    const input: Record<string, unknown> = {}
+    if (filePath !== null) input["filePath"] = filePath
+    if (content !== null) input["content"] = content
+    return {
+      toolName: "write",
+      input,
+      result: { ok: true, filePath: filePath ?? undefined },
+      ok: true,
+      originalClineName: original,
+    }
+  },
+  edit: (raw, original) => {
+    // replace_in_file / apply_diff: `path` is the file, `diff` is the
+    // patch. cline never overloads `content` here either.
+    const filePath = pickString(raw.path)
+    const diff = pickString(raw.diff)
+    const input: Record<string, unknown> = {}
+    if (filePath !== null) input["filePath"] = filePath
+    if (diff !== null) input["diff"] = diff
+    return {
+      toolName: "edit",
+      input,
+      result: { ok: true, filePath: filePath ?? undefined },
+      ok: true,
+      originalClineName: original,
+    }
+  },
+  bash: (raw, original) => {
+    // Rare path — most cline `bash` activity arrives via `say.command`, not
+    // `say.tool`. This branch handles the (occasional) tool-shaped emission.
+    const command = pickString(raw["command"]) ?? pickString(raw.content) ?? ""
+    return {
+      toolName: "bash",
+      input: { command },
+      result: { ok: true },
+      ok: true,
+      originalClineName: original,
+    }
+  },
+  glob: (raw, original) => {
+    const path = pickString(raw.path) ?? "."
+    const recursive = raw.recursive === true
+    // For list_files, cline puts the LISTING body in `content`. Capture it
+    // in the result so consumers can see what was listed; do NOT use it
+    // as the pattern (that'd produce a glob like `<output>/**`).
+    const output = pickString(raw.content)
+    const result: Record<string, unknown> = { ok: true }
+    if (output !== null) result["output"] = output
+    return {
+      toolName: "glob",
+      input: { pattern: recursive ? `${path}/**` : `${path}/*` },
+      result,
+      ok: true,
+      originalClineName: original,
+    }
+  },
+  grep: (raw, original) => {
+    const pattern = pickString(raw.regex) ?? ""
+    const path = pickString(raw.path) ?? "."
+    const filePattern =
+      pickString(raw.filePattern) ?? pickString(raw.file_pattern) ?? undefined
+    // cline overloads `content` per tool: for grep/search and list it
+    // carries the OUTPUT body (matches / directory listing). Preserve it
+    // in the result so opencode renderers and runOnce text consumers
+    // both see the search hits.
+    const output = pickString(raw.content)
+    const input: Record<string, unknown> = { pattern, path }
+    if (filePattern !== undefined) input["include"] = filePattern
+    const result: Record<string, unknown> = { ok: true }
+    if (output !== null) result["output"] = output
+    return {
+      toolName: "grep",
+      input,
+      result,
+      ok: true,
+      originalClineName: original,
+    }
+  },
+  webfetch: (raw, original) => {
+    const url = pickString(raw["url"]) ?? pickString(raw.content) ?? ""
+    return {
+      toolName: "webfetch",
+      input: { url },
+      result: { ok: true },
+      ok: true,
+      originalClineName: original,
+    }
+  },
+  websearch: (raw, original) => {
+    const query = pickString(raw["query"]) ?? pickString(raw.content) ?? ""
+    return {
+      toolName: "websearch",
+      input: { query },
+      result: { ok: true },
+      ok: true,
+      originalClineName: original,
+    }
+  },
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function pickString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null
+}
+
+function pickNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null
+}
+
+/**
+ * For unknown tools we can't shape — preserve a flat snapshot of the JSON-
+ * serializable fields so opencode can render *something* useful. We strip
+ * the `tool` key (it's metadata, not input) and skip nested non-primitives
+ * beyond depth 1 to avoid exporting cycles.
+ */
+function pickPassthroughInput(payload: ClineToolPayload): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(payload)) {
+    if (k === "tool") continue
+    if (
+      typeof v === "string" ||
+      typeof v === "number" ||
+      typeof v === "boolean" ||
+      v === null
+    ) {
+      out[k] = v
+    } else if (Array.isArray(v) || (typeof v === "object" && v !== null)) {
+      try {
+        // shallow JSON-clone, ignore if not serializable
+        out[k] = JSON.parse(JSON.stringify(v))
+      } catch {
+        /* drop */
+      }
+    }
+  }
+  return out
+}
+
