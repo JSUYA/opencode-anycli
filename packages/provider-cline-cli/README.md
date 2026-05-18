@@ -51,28 +51,14 @@ const model = provider.languageModel("default")
                     cline CLI subprocess
 ```
 
-### What this gets you
+### Why skill bypass exists
 
-1. **cline-native tool activity becomes first-class opencode tool events.**
-   Every `say.tool` / `say.command` / `ask.command_output` cline emits is
-   translated to a V3 `tool-call` + `tool-result` pair, so opencode's UI
-   shows file reads, edits, shell commands, searches, … instead of just
-   the final text.
-
-2. **Skill slash-commands actually load skill content.** When the user
-   types `/karpathy ...` opencode rewrites the prompt with a
-   `<command-instruction>Run the \`karpathy-guidelines\` skill workflow...`
-   block. Custom cline builds (e.g. GaussO3-CLI) reliably ignore those
-   directives — they just answer with their own tools. The adapter
-   intercepts the directive and emits the `skill` tool-call before cline
-   is even spawned; opencode then loads `SKILL.md` into the conversation
-   so the *next* turn cline sees the real skill rules in context.
-
-3. **`<opencode-call>` protocol** stays available for compliant cline
-   builds. When cline emits `<opencode-call name="X">{...}</opencode-call>`
-   tags inside its text stream, the parser extracts them and forwards as
-   V3 tool-call parts with `finishReason: "tool-calls"` so opencode runs
-   the host-side dispatch and re-enters cline with the tool-result.
+opencode registers a `skill` tool but cline ignores it — cline's own system
+prompt wins and it never emits a skill tool-call, so `SKILL.md` never
+loads. The adapter detects the user's skill intent (slash command or
+natural-language phrasing) and synthesizes the `skill` tool-call on
+cline's behalf, so opencode actually loads the skill before resuming
+cline.
 
 ---
 
