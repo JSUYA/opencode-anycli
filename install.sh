@@ -65,6 +65,10 @@ Usage: ./install.sh [--skip-build] [--rebuild] [--no-auto-deps] [--no-lsp-deps]
                    files until you install it yourself. Other languages'
                    LSPs (gopls, lua-ls, etc.) are unaffected — opencode
                    downloads or installs those on first use.
+                   The installer deep-merges template defaults into the
+                   existing opencode.json / tui.json so user edits survive a
+                   re-install. To reset owned keys back to the bundled
+                   template, delete the file and re-run install.sh.
   --user           DEPRECATED no-op (kept for backward compat with
                    `opencode-anycli --update --user`).
   --sudo           DEPRECATED but still functional: forces 'sudo' wrapping
@@ -76,6 +80,51 @@ EOF
     *) err "Unknown arg: $arg"; exit 2 ;;
   esac
 done
+
+# ─── Helper: deep-merge JSON ─────────────────────────────────────────────────
+# Used to install opencode.json / tui.json without clobbering user keys.
+#
+# Computes `template * existing` (recursive merge, existing wins for shared
+# keys). Template-only keys are added; existing-only keys (e.g. user-added
+# `plugin[]`, extra agents installed by oh-my-anycli, manually overridden
+# provider options) are preserved.
+#
+# Recovery: to reset owned keys back to the bundled template, delete the
+# target file and re-run install.sh — the no-target branch writes a fresh
+# template copy.
+#
+# jq is preferred. node fallback exists because opencode-anycli already
+# requires Node 20+ as a hard prerequisite, so it is universally available
+# even on systems missing jq.
+oc_json_merge() {
+  # oc_json_merge <existing-file> <template-content>
+  local existing="$1" template_content="$2"
+  local tmpl_file
+  tmpl_file="$(mktemp)"
+  printf '%s' "$template_content" > "$tmpl_file"
+  local rc=0
+  if command -v jq >/dev/null 2>&1; then
+    jq -s '.[0] * .[1]' "$tmpl_file" "$existing" || rc=$?
+  else
+    node -e '
+      const fs=require("fs");
+      const [e,t]=process.argv.slice(1);
+      const E=JSON.parse(fs.readFileSync(e,"utf8"));
+      const T=JSON.parse(fs.readFileSync(t,"utf8"));
+      function m(a,b){
+        if(a&&typeof a==="object"&&!Array.isArray(a)&&b&&typeof b==="object"&&!Array.isArray(b)){
+          const o={...a};
+          for(const k of Object.keys(b)) o[k]=(k in a)?m(a[k],b[k]):b[k];
+          return o;
+        }
+        return b;
+      }
+      process.stdout.write(JSON.stringify(m(T,E),null,2)+"\n");
+    ' "$existing" "$tmpl_file" || rc=$?
+  fi
+  rm -f "$tmpl_file"
+  return $rc
+}
 
 # ─── Helper: prompt, default-no ───────────────────────────────────────────────
 ask_yes() {
@@ -419,22 +468,33 @@ if [ ! -f "$PROVIDER_DIST" ]; then
   exit 1
 fi
 note_path() { printf "  ${DIM}↳ provider dist: %s${RESET}\n" "$*"; }
-# Idempotent: if the existing config already substitutes to the current
-# PROVIDER_DIST path, skip the write entirely (no .bak file proliferation).
-# Compare against what we would have written.
 EXPECTED="$(sed "s|__OPENCODE_ANYCLI_PROVIDER_DIST__|${PROVIDER_DIST}|g" "$SOURCE")"
-if [ -f "$TARGET" ] && [ "$(cat "$TARGET")" = "$EXPECTED" ]; then
-  ok "Config already up-to-date: $TARGET"
-  note_path "$PROVIDER_DIST"
-else
-  if [ -f "$TARGET" ]; then
-    BACKUP="$TARGET.bak.$(date +%s)"
-    cp "$TARGET" "$BACKUP"
-    warn "Existing config differs; previous version backed up: $BACKUP"
-  fi
+# Non-destructive install: deep-merge the template's owned keys into any
+# existing opencode.json so user-added entries (custom `plugin[]` written by
+# oh-my-anycli's plugin registration, extra agent definitions, manually
+# overridden provider options) survive a re-install. To reset owned keys to
+# the bundled template, delete this file and re-run install.sh.
+if [ ! -f "$TARGET" ]; then
   printf '%s\n' "$EXPECTED" > "$TARGET"
   ok "Config installed: $TARGET"
   note_path "$PROVIDER_DIST"
+else
+  if ! MERGED="$(oc_json_merge "$TARGET" "$EXPECTED")"; then
+    err "Failed to merge $SOURCE into $TARGET"
+    err "  Install jq or check Node availability, then retry."
+    exit 1
+  fi
+  if [ "$(cat "$TARGET")" = "$MERGED" ]; then
+    ok "Config already up-to-date: $TARGET"
+    note_path "$PROVIDER_DIST"
+  else
+    BACKUP="$TARGET.bak.$(date +%s)"
+    cp "$TARGET" "$BACKUP"
+    warn "Existing config differs; previous version backed up: $BACKUP"
+    printf '%s\n' "$MERGED" > "$TARGET"
+    ok "Config merged (preserved user keys): $TARGET"
+    note_path "$PROVIDER_DIST"
+  fi
 fi
 
 # AGENTS.md template
@@ -459,17 +519,26 @@ if [ ! -f "$EXIT_CONFIRM_DIR/dist/tui.js" ]; then
   exit 1
 fi
 TUI_EXPECTED="$(sed "s|__OPENCODE_ANYCLI_EXIT_CONFIRM_DIR__|${EXIT_CONFIRM_DIR}|g" "$TUI_SOURCE")"
-if [ -f "$TUI_TARGET" ] && [ "$(cat "$TUI_TARGET")" = "$TUI_EXPECTED" ]; then
-  ok "tui.json already up-to-date: $TUI_TARGET"
-elif [ -f "$TUI_TARGET" ]; then
-  BACKUP="$TUI_TARGET.bak.$(date +%s)"
-  cp "$TUI_TARGET" "$BACKUP"
-  warn "Existing tui.json differs; previous version backed up: $BACKUP"
+# Same deep-merge semantics as opencode.json. tui.json typically only has
+# template-owned keys today, but the merge keeps additional user-added
+# keybinds / plugin entries from being wiped on re-install.
+if [ ! -f "$TUI_TARGET" ]; then
   printf '%s\n' "$TUI_EXPECTED" > "$TUI_TARGET"
   ok "tui.json installed: $TUI_TARGET"
 else
-  printf '%s\n' "$TUI_EXPECTED" > "$TUI_TARGET"
-  ok "tui.json installed: $TUI_TARGET"
+  if ! TUI_MERGED="$(oc_json_merge "$TUI_TARGET" "$TUI_EXPECTED")"; then
+    err "Failed to merge $TUI_SOURCE into $TUI_TARGET"
+    exit 1
+  fi
+  if [ "$(cat "$TUI_TARGET")" = "$TUI_MERGED" ]; then
+    ok "tui.json already up-to-date: $TUI_TARGET"
+  else
+    BACKUP="$TUI_TARGET.bak.$(date +%s)"
+    cp "$TUI_TARGET" "$BACKUP"
+    warn "Existing tui.json differs; previous version backed up: $BACKUP"
+    printf '%s\n' "$TUI_MERGED" > "$TUI_TARGET"
+    ok "tui.json merged (preserved user keys): $TUI_TARGET"
+  fi
 fi
 
 # ─── 7. Symlink the CLI binary via `npm link` ────────────────────────────────
