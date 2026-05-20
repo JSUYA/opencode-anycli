@@ -46,10 +46,14 @@ Usage: ./install.sh [--skip-build] [--rebuild] [--no-auto-deps] [--no-lsp-deps]
   no extra flag needed. The user-visible install is just:
       git clone … && cd … && ./install.sh
 
-  After build, this script appends a managed PATH-export block to your
-  shell rc file (.bashrc for bash, .zshrc for zsh, config.fish for
-  fish) pointing at <repo>/packages/cli/bin/. Open a new shell or
-  'source' the rc file to use the 'opencode-anycli' command.
+  After build, this script runs 'npm link' from packages/cli/ to symlink
+  the 'opencode-anycli' binary into your active Node's global bin dir
+  (e.g. ~/.nvm/versions/node/<ver>/bin/opencode-anycli). That directory
+  is already on PATH for any working Node install — no shell rc edit is
+  required, no 'source ~/.bashrc' step.
+
+  Any legacy 'export PATH=…' block previously appended to your shell rc
+  files by an older install is removed automatically.
 
   --skip-build     Skip the workspace build step (assumes dist/ exists)
   --rebuild        Force a fresh build of every workspace, bypassing the
@@ -63,8 +67,10 @@ Usage: ./install.sh [--skip-build] [--rebuild] [--no-auto-deps] [--no-lsp-deps]
                    downloads or installs those on first use.
   --user           DEPRECATED no-op (kept for backward compat with
                    `opencode-anycli --update --user`).
-  --sudo           DEPRECATED no-op (was for /usr/local/bin symlink;
-                   the PATH-based install never needs sudo).
+  --sudo           DEPRECATED but still functional: forces 'sudo' wrapping
+                   on the opencode/cline/tsls auto-install steps. Has no
+                   effect on the npm link step itself — that one auto-
+                   retries with sudo only on EACCES.
 EOF
       exit 0 ;;
     *) err "Unknown arg: $arg"; exit 2 ;;
@@ -466,156 +472,158 @@ else
   ok "tui.json installed: $TUI_TARGET"
 fi
 
-# ─── 7. Add the CLI's bin directory to your shell PATH ───────────────────────
-# We deliberately do NOT symlink into /usr/local/bin or ~/.local/bin anymore.
-# Instead we append a managed `export PATH=...` block to the user's shell rc
-# (.bashrc / .zshrc / fish config), pointing at this checkout's bin dir. That
-# means:
-#   - upgrades via `git pull` / --update take effect immediately, no relink.
-#   - moving / deleting the repo cleanly removes the binary from PATH.
-#   - no sudo is ever needed for the link step itself.
-# We use BEGIN/END markers so we can detect and update the block in place
-# when the repo is relocated, without leaving a duplicate behind.
-step "Adding opencode-anycli to your shell PATH"
+# ─── 7. Symlink the CLI binary via `npm link` ────────────────────────────────
+# We use `npm link` from packages/cli/ instead of appending a managed
+# `export PATH=…` block to ~/.bashrc / ~/.zshrc / config.fish. npm creates
+# a symlink under the active Node's global bin dir (e.g.
+# /home/<user>/.nvm/versions/node/<ver>/bin/opencode-anycli), which is
+# already on PATH for any working Node install. Benefits over the rc-edit:
+#   - no shell rc edit required, no `source ~/.bashrc` step
+#   - the same toolchain that installs opencode/cline manages our binary,
+#     so nvm users get the link in the currently-active node version
+#   - `npm unlink -g opencode-anycli` cleanly reverses it
+#   - upgrades via `git pull` / --update take effect immediately because
+#     the symlink target is the in-repo packages/cli/bin/ entry point
+#
+# Legacy cleanup: previous installs appended a managed `export PATH=…`
+# block to the user's rc file(s). Strip them on every run so a stale
+# entry pointing at this checkout doesn't shadow / duplicate the npm
+# link symlink.
 BIN_DIR="$REPO_DIR/packages/cli/bin"
 chmod +x "$BIN_DIR/opencode-anycli" || true
 
-# --user / --sudo predate the PATH-based install. They used to choose
-# ~/.local/bin vs /usr/local/bin for the symlink target. Both are now
-# meaningless — keep them silently so existing wrappers like
-# `opencode-anycli --update --user` don't break, but warn once.
-if [ "$USER_INSTALL" -eq 1 ] || [ "$USE_SUDO" -eq 1 ]; then
-  note "(--user / --sudo are no-ops with the new PATH-based install; ignoring)"
+step "Removing legacy managed PATH block(s) from shell rc files (if any)"
+LEGACY_MARKER_BEGIN="# >>> opencode-anycli (managed by install.sh) >>>"
+LEGACY_MARKER_END="# <<< opencode-anycli (managed by install.sh) <<<"
+LEGACY_RC_FILES=("$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.config/fish/config.fish")
+LEGACY_FOUND=0
+for rc in "${LEGACY_RC_FILES[@]}"; do
+  if [ ! -f "$rc" ]; then continue; fi
+  if ! grep -qF "$LEGACY_MARKER_BEGIN" "$rc"; then continue; fi
+  tmp_rc="$(mktemp)"
+  awk -v b="$LEGACY_MARKER_BEGIN" -v e="$LEGACY_MARKER_END" '
+    $0 == b { inside = 1; next }
+    $0 == e { inside = 0; next }
+    !inside { print }
+  ' "$rc" > "$tmp_rc"
+  mv "$tmp_rc" "$rc"
+  ok "removed legacy managed PATH block from $rc (replaced by npm link)"
+  LEGACY_FOUND=1
+done
+if [ "$LEGACY_FOUND" -eq 0 ]; then
+  info "no legacy PATH blocks to clean up"
 fi
 
-# Detect the user's interactive shell. SHELL is set by login; fall back to
-# /bin/bash so a missing/empty SHELL still yields a sensible default.
-SHELL_NAME="$(basename "${SHELL:-/bin/bash}")"
-case "$SHELL_NAME" in
-  bash)
-    RC_FILE="$HOME/.bashrc"
-    EXPORT_LINE="export PATH=\"$BIN_DIR:\$PATH\""
-    ;;
-  zsh)
-    RC_FILE="${ZDOTDIR:-$HOME}/.zshrc"
-    EXPORT_LINE="export PATH=\"$BIN_DIR:\$PATH\""
-    ;;
-  fish)
-    RC_FILE="$HOME/.config/fish/config.fish"
-    # fish_add_path is idempotent at runtime AND survives reordering, but
-    # we still wrap it in our managed block so we can remove cleanly.
-    EXPORT_LINE="fish_add_path \"$BIN_DIR\""
-    ;;
-  *)
-    warn "Could not auto-configure PATH for shell '$SHELL_NAME'."
-    note "Add this line to your shell init manually:"
-    note "  export PATH=\"$BIN_DIR:\$PATH\""
-    RC_FILE=""
-    ;;
-esac
-
-# SOURCE_CMD: the exact one-liner the user can paste in their CURRENT shell
-# to make `opencode-anycli` available without opening a new terminal. This
-# is what we surface at the very end of the script so it doesn't get lost
-# in the "next steps" block. We also export NEEDS_PATH_RELOAD so the final
-# block knows whether to print the apply hint at all (no point if PATH was
-# already correct from a previous install).
-SOURCE_CMD=""
-NEEDS_PATH_RELOAD=0
-case "$SHELL_NAME" in
-  fish) SOURCE_CMD="source $RC_FILE" ;;
-  *)    SOURCE_CMD="source $RC_FILE" ;;  # bash/zsh syntax matches
-esac
-
-if [ -n "$RC_FILE" ]; then
-  MARKER_BEGIN="# >>> opencode-anycli (managed by install.sh) >>>"
-  MARKER_END="# <<< opencode-anycli (managed by install.sh) <<<"
-  mkdir -p "$(dirname "$RC_FILE")"
-  touch "$RC_FILE"
-
-  # Read the current managed block (if any) without invoking grep with a
-  # pattern that contains regex metachars from the marker text.
-  current_block="$(awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-      $0 == b { inside = 1; next }
-      $0 == e { inside = 0; next }
-      inside  { print }
-    ' "$RC_FILE")"
-  expected_block="$EXPORT_LINE"
-
-  if [ "$current_block" = "$expected_block" ]; then
-    ok "PATH entry already in $RC_FILE (no change needed)"
-  else
-    if [ -n "$current_block" ]; then
-      # Block exists but content differs — most often the repo was moved.
-      # Strip the old block, then append a fresh one.
-      tmp_rc="$(mktemp)"
-      awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-        $0 == b { inside = 1; next }
-        $0 == e { inside = 0; next }
-        !inside { print }
-      ' "$RC_FILE" > "$tmp_rc"
-      mv "$tmp_rc" "$RC_FILE"
-      info "Replaced existing managed block in $RC_FILE (path changed)"
-    fi
-    # Ensure trailing newline before our block so we don't accidentally
-    # append onto the previous line.
-    if [ -s "$RC_FILE" ] && [ "$(tail -c1 "$RC_FILE" | wc -l)" -eq 0 ]; then
-      printf '\n' >> "$RC_FILE"
-    fi
-    {
-      printf '\n%s\n%s\n%s\n' "$MARKER_BEGIN" "$EXPORT_LINE" "$MARKER_END"
-    } >> "$RC_FILE"
-    ok "Appended PATH entry to $RC_FILE"
-  fi
+# --user / --sudo predate the npm-link install. --user used to choose
+# ~/.local/bin vs /usr/local/bin for the symlink target and is now a
+# true no-op. --sudo still forces auto_npm_install (opencode/cline/tsls)
+# under sudo — printed earlier in this run; the npm link step ignores it
+# and only escalates on EACCES.
+if [ "$USER_INSTALL" -eq 1 ]; then
+  note "(--user is a no-op with the npm-link install; ignoring)"
+fi
+if [ "$USE_SUDO" -eq 1 ]; then
+  note "(--sudo only affected the opencode/cline auto-install steps above;"
+  note " npm link does not use it unless it hits EACCES.)"
 fi
 
-# The user only needs to source/relaunch when the CURRENT shell doesn't
-# already have BIN_DIR on PATH. New shells always pick it up from the rc
-# block we just wrote, so this check is purely about helping the existing
-# session. Whether we appended a fresh block or matched an existing one
-# is irrelevant — what matters is what the live PATH looks like RIGHT NOW.
-if [ -n "$RC_FILE" ]; then
-  case ":$PATH:" in
-    *":$BIN_DIR:"*) NEEDS_PATH_RELOAD=0 ;;
-    *)              NEEDS_PATH_RELOAD=1 ;;
-  esac
+step "Linking the CLI via 'npm link'"
+if ! command -v npm >/dev/null 2>&1; then
+  err "npm is required for the npm-link install but is not on PATH."
+  err "  Install Node 20+ (which bundles npm), then re-run ./install.sh."
+  exit 1
 fi
 
-# Legacy-binary shadowing check. If a previous --sudo / --user install
-# left a real `opencode-anycli` (not a symlink to BIN_DIR) at a higher-
-# priority PATH location, the user's shell will keep invoking that stale
-# entry instead of the freshly-built one — same symptom as a stale dist,
-# but with no obvious clue from the install output. We check what
-# `command -v opencode-anycli` resolves to right now (the script's PATH
-# already mirrors the parent shell's at this point) and compare its real
-# path against our BIN_DIR entry. Mismatch → tell the user exactly what
-# to delete and where.
+# Where will npm drop the bin symlink? Used both for the success
+# message and the PATH-on-shell check below.
+NPM_PREFIX="$(npm prefix -g 2>/dev/null || true)"
+if [ -z "$NPM_PREFIX" ]; then
+  err "npm prefix -g returned nothing — your npm install looks broken."
+  exit 1
+fi
+NPM_GLOBAL_BIN="$NPM_PREFIX/bin"
+TARGET_LINK="$NPM_GLOBAL_BIN/opencode-anycli"
+
+# `npm link` from packages/cli/ creates two symlinks:
+#   1) $NPM_PREFIX/lib/node_modules/opencode-anycli  -> packages/cli
+#   2) $NPM_GLOBAL_BIN/opencode-anycli                -> ../lib/node_modules/opencode-anycli/bin/opencode-anycli
+# The walk-up template resolver inside cli/src/config.ts follows the
+# real path, so it finds templates/ + packages/provider-cline-cli/dist
+# without any extra resolution logic.
+link_log="$(mktemp -t opencode-anycli-npm-link.XXXXXX)"
+link_status=0
+(
+  cd "$REPO_DIR/packages/cli"
+  npm link 2>&1
+) | tee "$link_log"
+link_status="${PIPESTATUS[0]}"
+
+# EACCES recovery: a root-owned global node_modules tree (typical of
+# plain /usr/local Node installs) needs sudo for `npm link`. nvm users
+# never hit this. We retry with sudo only when the failure log clearly
+# blames permissions, so accidental non-permission failures still
+# bubble up instead of being silently masked.
+if [ "$link_status" -ne 0 ] \
+   && grep -qE "EACCES|permission denied" "$link_log" 2>/dev/null; then
+  warn "npm link failed with a permission error against $NPM_PREFIX."
+  warn "  This usually means the global node_modules tree is root-owned."
+  warn "  Retrying with sudo…"
+  ( cd "$REPO_DIR/packages/cli" && sudo npm link ) && link_status=0 || link_status=$?
+fi
+rm -f "$link_log"
+
+if [ "$link_status" -ne 0 ]; then
+  err "npm link failed (exit $link_status). See output above."
+  err "  Manual recovery: cd $REPO_DIR/packages/cli && npm link"
+  exit 1
+fi
+
+if [ ! -L "$TARGET_LINK" ] && [ ! -e "$TARGET_LINK" ]; then
+  err "npm link returned 0 but $TARGET_LINK is missing."
+  err "  Check 'npm prefix -g' and your Node/nvm setup."
+  exit 1
+fi
+ok "Linked: $TARGET_LINK"
+note "→ $BIN_DIR/opencode-anycli"
+
+# PATH-shadowing check: ask the shell what `opencode-anycli` resolves to
+# RIGHT NOW and compare against the npm-link symlink we just created.
+# Most common cause of a mismatch: a root-owned legacy binary in
+# /usr/local/bin or ~/.local/bin from a pre-PATH-block install scheme
+# that still sits ahead of $(npm prefix -g)/bin on PATH. The earlier
+# version of this guard compared readlink-of-symlink against
+# readlink-of-symlink-target and so could never trip — keep it pointed
+# at command -v output so it actually catches shadowing.
 RESOLVED_CLI="$(command -v opencode-anycli 2>/dev/null || true)"
 if [ -n "$RESOLVED_CLI" ]; then
   RESOLVED_CLI_REAL="$(readlink -f "$RESOLVED_CLI" 2>/dev/null || printf '%s' "$RESOLVED_CLI")"
-  EXPECTED_CLI_REAL="$(readlink -f "$BIN_DIR/opencode-anycli" 2>/dev/null || printf '%s' "$BIN_DIR/opencode-anycli")"
+  EXPECTED_CLI_REAL="$(readlink -f "$TARGET_LINK" 2>/dev/null || printf '%s' "$TARGET_LINK")"
   if [ "$RESOLVED_CLI_REAL" != "$EXPECTED_CLI_REAL" ]; then
     warn "PATH conflict: 'opencode-anycli' on PATH resolves to a different binary"
     note "found    : $RESOLVED_CLI"
-    note "expected : $BIN_DIR/opencode-anycli"
-    warn "  The shadowing entry is from a previous install. Remove it so this"
-    warn "  fresh build wins on PATH (use sudo if it is root-owned):"
-    note "  rm -f \"$RESOLVED_CLI\""
-    warn "  Then open a new shell or 'source' your rc file."
+    note "expected : $TARGET_LINK"
+    warn "  A legacy install is shadowing the npm-link symlink. Remove it"
+    warn "  (use sudo if root-owned) so the new link wins, then re-hash:"
+    note "    rm -f \"$RESOLVED_CLI\""
+    note "    hash -r   # or open a new shell"
   fi
 fi
 
-# ─── 8. Next steps ────────────────────────────────────────────────────────────
-# We CAN'T modify the parent shell's environment from inside this script
-# (a child process never can). So we surface the exact one-liner to apply
-# the new PATH in the current shell, prominently. New terminals pick it
-# up automatically — the source is only needed for the existing one.
-if [ "$NEEDS_PATH_RELOAD" -eq 1 ] && [ -n "$SOURCE_CMD" ]; then
-  printf "\n${YELLOW}▶ Apply the new PATH in this shell:${RESET}\n"
-  printf "    ${GREEN}%s${RESET}\n" "$SOURCE_CMD"
-  printf "  ${DIM}(or just open a new terminal — both work.)${RESET}\n"
-fi
+# Surface a warning if npm's global bin dir isn't on PATH at all. With
+# nvm this is always set up. With a hand-rolled custom prefix the user
+# may need to add it themselves.
+case ":$PATH:" in
+  *":$NPM_GLOBAL_BIN:"*)
+    : ;;
+  *)
+    warn "$NPM_GLOBAL_BIN is not on your PATH."
+    note "Add it to your shell init manually so opencode-anycli is found:"
+    note "  export PATH=\"$NPM_GLOBAL_BIN:\$PATH\""
+    note "Then open a new shell or 'source' your rc file."
+    ;;
+esac
 
+# ─── 8. Next steps ────────────────────────────────────────────────────────────
 cat <<EOF
 
 ${GREEN}installation complete / Installation complete${RESET}

@@ -2,14 +2,19 @@
 # uninstall.sh — remove what install.sh placed on this machine.
 #
 # What this removes:
-#   1. The managed PATH block from shell rc files, plus any legacy
-#      `opencode-anycli` binary/symlink in /usr/local/bin, /usr/bin,
-#      ~/.local/bin, or npm's global bin
-#   2. Optionally: ~/.config/opencode-anycli/ (the wrapper's XDG home,
+#   1. The `npm link` symlink the new installer created at
+#      $(npm prefix -g)/bin/opencode-anycli, by running 'npm unlink -g
+#      opencode-anycli' from packages/cli/.
+#   2. (Legacy) The managed PATH block previously appended by older
+#      install.sh runs to ~/.bashrc / ~/.zshrc / ~/.config/fish/config.fish.
+#   3. (Legacy) Any pre-existing `opencode-anycli` binary/symlink in
+#      /usr/local/bin, /usr/bin, ~/.local/bin from --sudo / --user
+#      installs that predate both the npm-link and PATH-block schemes.
+#   4. Optionally: ~/.config/opencode-anycli/ (the wrapper's XDG home,
 #      including opencode.json + AGENTS.md + any .bak backups + anything
 #      oh-my-anycli installed under it). Default behaviour KEEPS the
 #      config so a re-install can restore it; pass --purge-config to remove.
-#   3. Optionally: dist/ + node_modules/ inside this repo (the build).
+#   5. Optionally: dist/ + node_modules/ inside this repo (the build).
 #      Default keeps them; pass --purge-build to remove.
 #
 # What this does NOT touch:
@@ -124,20 +129,48 @@ remove_symlink() {
   info "nothing at $link (already removed)"
 }
 
-# ─── 1a. Remove the managed PATH block from the user's shell rc files ───────
-# install.sh now appends an `export PATH=…` block bracketed by markers to
-# .bashrc / .zshrc / fish config. Strip it back out here so an uninstall
-# leaves the rc file in its pre-install state. We sweep all three rc
-# locations regardless of $SHELL so users who run multiple shells get a
-# clean removal.
-step "Removing managed PATH block from shell rc files"
+# ─── 1a. Remove the `npm link` symlink (current install method) ─────────────
+# install.sh runs `npm link` from packages/cli/, which puts a symlink at
+# $(npm prefix -g)/bin/opencode-anycli. The canonical reversal is to run
+# `npm unlink -g opencode-anycli`. Doing it from the same package
+# directory keeps npm's bookkeeping happy (it can resolve the package
+# name -> install location without a registry round-trip).
+step "Removing the npm link"
+if command -v npm >/dev/null 2>&1; then
+  if [ -d "$REPO_DIR/packages/cli" ]; then
+    if (
+      cd "$REPO_DIR/packages/cli" && npm unlink -g opencode-anycli 2>&1
+    ); then
+      ok "ran 'npm unlink -g opencode-anycli' from packages/cli/"
+    else
+      warn "'npm unlink -g opencode-anycli' did not succeed cleanly."
+      warn "  If a global symlink is still present, remove it manually:"
+      warn "    rm -f \"\$(npm prefix -g)/bin/opencode-anycli\""
+    fi
+  else
+    warn "packages/cli/ missing inside this checkout; skipping npm unlink."
+  fi
+else
+  warn "npm not on PATH; skipping 'npm unlink -g opencode-anycli'."
+  warn "  If a previous install left a symlink at \$(npm prefix -g)/bin,"
+  warn "  remove it by hand once npm is reinstalled."
+fi
+
+# ─── 1b. Legacy: managed PATH block in shell rc files ───────────────────────
+# Older install.sh versions appended `export PATH=…` bracketed by markers
+# to .bashrc / .zshrc / fish config instead of using npm link. Strip those
+# blocks back out so the rc file is left in its pre-install state. We
+# sweep all three rc locations regardless of $SHELL so users who run
+# multiple shells get a clean removal. Harmless no-op on machines that
+# only ever knew the npm-link install.
+step "Removing legacy managed PATH block(s) from shell rc files (if any)"
 RC_FILES=("$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.config/fish/config.fish")
 MARKER_BEGIN="# >>> opencode-anycli (managed by install.sh) >>>"
 MARKER_END="# <<< opencode-anycli (managed by install.sh) <<<"
 for rc in "${RC_FILES[@]}"; do
   if [ ! -f "$rc" ]; then continue; fi
   if ! grep -qF "$MARKER_BEGIN" "$rc"; then
-    info "no managed block in $rc"
+    info "no legacy block in $rc"
     continue
   fi
   tmp_rc="$(mktemp)"
@@ -147,17 +180,17 @@ for rc in "${RC_FILES[@]}"; do
     !inside { print }
   ' "$rc" > "$tmp_rc"
   mv "$tmp_rc" "$rc"
-  ok "removed managed PATH block from $rc"
+  ok "removed legacy managed PATH block from $rc"
 done
 
-# ─── 1b. Legacy fallback: remove any pre-PATH-block install artifact
+# ─── 1c. Legacy fallback: remove any pre-PATH-block install artifact
 #         install.sh used to drop a symlink into /usr/local/bin (--sudo /
 #         default-system) or ~/.local/bin (--user). Both are gone in current
 #         install.sh but a previous install may have left one (or several)
 #         behind. Sweep every plausible location plus the npm-global bin
-#         (in case some user did `npm link` from this checkout). Anything
-#         not owned by the current user is escalated to sudo with the
-#         user's consent (or auto if --yes / --sudo).
+#         (covers the npm-link case too, in the rare event 1a above failed
+#         to remove it). Anything not owned by the current user is
+#         escalated to sudo with the user's consent (or auto if --yes / --sudo).
 if [ "$SCOPE" = "none" ]; then
   step "Skipping legacy opencode-anycli binary removal (--no-symlink)"
   targets=()

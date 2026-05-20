@@ -37,12 +37,8 @@ installer can install them automatically with npm.
 git clone https://github.com/JSUYA/opencode-anycli.git
 cd opencode-anycli
 ./install.sh
-source ~/.bashrc      # use ~/.zshrc for zsh
 opencode-anycli
 ```
-
-The installer adds a managed PATH block to your shell rc file. Re-running the
-installer updates that block in place.
 
 Common install flags:
 
@@ -120,8 +116,10 @@ interactive recovery for issues it can repair.
 ./uninstall.sh --purge-all
 ```
 
-The uninstaller removes OpenCode-AnyCLI-managed files only. It does not remove
-your normal `cline`, `~/.cline/`, or `~/.config/opencode/` setup.
+The uninstaller runs `npm unlink -g opencode-anycli` to drop the global
+symlink, strips any legacy PATH block from your shell rc files, and removes
+OpenCode-AnyCLI-managed files only. It does not remove your normal `cline`,
+`~/.cline/`, or `~/.config/opencode/` setup.
 
 ## Configuration
 

@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Exhaustive isolated tests for install.sh / uninstall.sh / --update.
 #
-# Strategy: redirect HOME to a per-test temp dir so we never touch the real
-# user's ~/.bashrc / ~/.zshrc / ~/.config. install.sh derives BIN_DIR from
-# the script's own path, so we still point it at the real repo.
+# Strategy: redirect HOME + npm_config_prefix to a per-test temp dir so we
+# never touch the real user's shell rc files, the real ~/.config, or the
+# real global node_modules tree. install.sh derives BIN_DIR from the
+# script's own path, so we still point it at the real repo on disk.
+#
+# Every install.sh invocation runs with --skip-build --no-auto-deps so we
+# don't rebuild every workspace per test and don't try to npm-install
+# opencode/cline/tsls into the fake prefix.
 
 set -u
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -12,63 +17,62 @@ UNINSTALL="$REPO/uninstall.sh"
 PASS=0; FAIL=0; FAILED_NAMES=()
 EXP_BIN="$REPO/packages/cli/bin"
 
-# Helpers
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 mk_home() {
+  # Fresh $HOME + fresh npm prefix. The npm-prefix dir mimics what nvm /
+  # /usr/local layout looks like: <prefix>/bin and <prefix>/lib/node_modules.
   local d; d="$(mktemp -d /tmp/install-test-XXXXXXXXXX)"
-  mkdir -p "$d/.config" "$d/.local/bin"
+  mkdir -p "$d/.config" "$d/.local/bin" "$d/npm-prefix/bin" "$d/npm-prefix/lib/node_modules"
   echo "$d"
 }
 run_install() {
   local home="$1"; shift
   HOME="$home" XDG_CONFIG_HOME="$home/.config" SHELL=/bin/bash \
-    bash "$INSTALL" --skip-build "$@" 2>&1
-}
-run_install_zsh() {
-  local home="$1"; shift
-  HOME="$home" XDG_CONFIG_HOME="$home/.config" SHELL=/bin/zsh \
-    bash "$INSTALL" --skip-build "$@" 2>&1
-}
-run_install_fish() {
-  local home="$1"; shift
-  HOME="$home" XDG_CONFIG_HOME="$home/.config" SHELL=/usr/bin/fish \
-    bash "$INSTALL" --skip-build "$@" 2>&1
-}
-run_install_unknown() {
-  local home="$1"; shift
-  HOME="$home" XDG_CONFIG_HOME="$home/.config" SHELL=/bin/csh \
-    bash "$INSTALL" --skip-build "$@" 2>&1
+    npm_config_prefix="$home/npm-prefix" \
+    bash "$INSTALL" --skip-build --no-auto-deps --no-lsp-deps "$@" 2>&1
 }
 run_uninstall() {
-  # Default helper for rc-block-only tests: skip the symlink sweep so we
-  # never accidentally touch /usr/local/bin/opencode-anycli on the
-  # developer's real machine.
+  # Default helper: skip the legacy symlink sweep so we never accidentally
+  # touch /usr/local/bin/opencode-anycli on the developer's real machine.
+  # `npm unlink -g` still runs against the fake npm_config_prefix.
   local home="$1"; shift
   HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    npm_config_prefix="$home/npm-prefix" \
     bash "$UNINSTALL" --no-symlink --yes "$@" 2>&1
 }
 run_uninstall_user_scope() {
-  # Helper for tests that DO want symlink removal exercised. Uses
+  # Helper for tests that DO want symlink-sweep removal exercised. Uses
   # --user so the sweep is confined to the fake $HOME/.local/bin and
   # never touches the real /usr/local/bin/opencode-anycli.
   local home="$1"; shift
   HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    npm_config_prefix="$home/npm-prefix" \
     bash "$UNINSTALL" --user --yes "$@" 2>&1
 }
+target_link() {
+  # Where install.sh will (or already did) drop the global binary symlink.
+  local home="$1"
+  printf '%s\n' "$home/npm-prefix/bin/opencode-anycli"
+}
+link_exists() {
+  # "yes" if the target_link is a symlink (or, less commonly, a plain file).
+  local home="$1"
+  local t; t="$(target_link "$home")"
+  [ -L "$t" ] || [ -e "$t" ] && echo yes || echo no
+}
+link_resolves_to_repo() {
+  # "yes" if the global symlink chases all the way back to packages/cli/bin/.
+  local home="$1"
+  local t; t="$(target_link "$home")"
+  local real; real="$(readlink -f "$t" 2>/dev/null || true)"
+  local expected; expected="$(readlink -f "$EXP_BIN/opencode-anycli" 2>/dev/null || true)"
+  [ -n "$real" ] && [ "$real" = "$expected" ] && echo yes || echo no
+}
 managed_blocks() {
-  # Print the count of managed blocks (BEGIN markers) in the given file.
+  # Print the count of legacy managed blocks (BEGIN markers) in the given file.
   local f="$1"
   [ -f "$f" ] || { echo 0; return; }
   grep -cF '# >>> opencode-anycli (managed by install.sh) >>>' "$f"
-}
-exported_path() {
-  # Print the export PATH= line(s) inside the managed block.
-  local f="$1"
-  [ -f "$f" ] || return
-  awk '
-    /^# >>> opencode-anycli \(managed by install\.sh\) >>>$/ { inside=1; next }
-    /^# <<< opencode-anycli \(managed by install\.sh\) <<<$/ { inside=0; next }
-    inside
-  ' "$f"
 }
 
 assert_eq() {
@@ -97,235 +101,156 @@ assert_contains() {
     printf '      haystack tail: %s\n' "$(printf '%s' "$haystack" | tail -c 200)"
   fi
 }
+assert_not_contains() {
+  local name="$1" haystack="$2" needle="$3"
+  if printf '%s' "$haystack" | grep -qF "$needle"; then
+    FAIL=$((FAIL+1))
+    FAILED_NAMES+=("$name")
+    printf '  \033[1;31m✗\033[0m %s\n' "$name"
+    printf '      unexpectedly contained: %s\n' "$needle"
+  else
+    PASS=$((PASS+1))
+    printf '  \033[1;32m✓\033[0m %s\n' "$name"
+  fi
+}
 
 section() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
 
 
-# ─── Section 1: install.sh — fresh state matrix ──────────────────────────────
-section "install.sh: fresh state"
+# ─── Section 1: install.sh — npm link, fresh state ───────────────────────────
+section "install.sh: npm link creates the global symlink"
 
-# T1: rc file does NOT exist before install (first-time user)
-H=$(mk_home); rm -f "$H/.bashrc"
+# T1: fresh isolated $HOME + empty npm prefix → install creates the link
+H=$(mk_home)
 out=$(run_install "$H")
-[ -f "$H/.bashrc" ] && got_exists=yes || got_exists=no
-assert_eq "T1 rc auto-created when missing" "$got_exists" "yes"
-assert_eq "T1 exactly one managed block" "$(managed_blocks "$H/.bashrc")" "1"
-assert_eq "T1 export line correct" "$(exported_path "$H/.bashrc")" \
-  "export PATH=\"$EXP_BIN:\$PATH\""
+assert_eq "T1 npm link symlink created"          "$(link_exists "$H")"          "yes"
+assert_eq "T1 symlink resolves back to packages/cli/bin/opencode-anycli" \
+                                                  "$(link_resolves_to_repo "$H")" "yes"
+assert_contains "T1 success message names the target path" "$out" "Linked: $(target_link "$H")"
 rm -rf "$H"
 
-# T2: empty rc file before install
-H=$(mk_home); : > "$H/.bashrc"
-out=$(run_install "$H")
-assert_eq "T2 empty rc → 1 managed block" "$(managed_blocks "$H/.bashrc")" "1"
-rm -rf "$H"
-
-# T3: rc file with pre-existing unrelated content
-H=$(mk_home); printf 'alias ll="ls -la"\nexport EDITOR=vim\n' > "$H/.bashrc"
-out=$(run_install "$H")
-assert_eq "T3 unrelated content kept (alias)" \
-  "$(grep -c 'alias ll' "$H/.bashrc")" "1"
-assert_eq "T3 unrelated content kept (EDITOR)" \
-  "$(grep -c 'EDITOR=vim' "$H/.bashrc")" "1"
-assert_eq "T3 + 1 managed block appended" "$(managed_blocks "$H/.bashrc")" "1"
-rm -rf "$H"
-
-
-# ─── Section 2: install.sh — idempotency ─────────────────────────────────────
-section "install.sh: idempotency"
-
-H=$(mk_home); : > "$H/.bashrc"
+# T2: re-running install.sh is idempotent — link still exists and still points
+#     back at the repo.
+H=$(mk_home)
 run_install "$H" >/dev/null
-run_install "$H" >/dev/null
-run_install "$H" >/dev/null
-assert_eq "T4 three runs → still 1 block (no duplicates)" \
-  "$(managed_blocks "$H/.bashrc")" "1"
 out=$(run_install "$H")
-assert_contains "T4 second run prints 'no change needed'" "$out" "no change needed"
+assert_eq "T2 second run keeps symlink intact"   "$(link_exists "$H")"           "yes"
+assert_eq "T2 second run still resolves to repo" "$(link_resolves_to_repo "$H")" "yes"
 rm -rf "$H"
 
 
-# ─── Section 3: install.sh — corrupted/edited block recovery ─────────────────
-section "install.sh: edited / corrupted block recovery"
+# ─── Section 2: install.sh — legacy PATH block auto-cleanup ──────────────────
+section "install.sh: strips legacy managed PATH block(s)"
 
-# T5: stale path (user moved repo) → replaced in place
-H=$(mk_home); : > "$H/.bashrc"
-run_install "$H" >/dev/null
-tmp_rc="$(mktemp)"
-sed 's|packages/cli/bin|/old/wrong/path|' "$H/.bashrc" > "$tmp_rc"
-mv "$tmp_rc" "$H/.bashrc"
-out=$(run_install "$H")
-assert_contains "T5 stale path → 'Replaced existing managed block'" "$out" "Replaced existing managed block"
-assert_eq "T5 still exactly 1 block" "$(managed_blocks "$H/.bashrc")" "1"
-assert_eq "T5 path now correct" "$(exported_path "$H/.bashrc")" \
-  "export PATH=\"$EXP_BIN:\$PATH\""
-rm -rf "$H"
-
-# T6: missing END marker (corruption) — fall back to "treat as no managed block"
-H=$(mk_home); printf '# >>> opencode-anycli (managed by install.sh) >>>\nexport PATH="/orphan:$PATH"\n# random unrelated\n' > "$H/.bashrc"
-out=$(run_install "$H")
-# awk inside=1 with no END means everything to EOF was inside; install
-# strips all that, then appends a fresh block. Original orphan is gone.
-assert_eq "T6 corrupted (no END) recovered → 1 block" "$(managed_blocks "$H/.bashrc")" "1"
-assert_eq "T6 orphan export removed" \
-  "$(grep -c '/orphan' "$H/.bashrc")" "0"
-rm -rf "$H"
-
-# T7: multiple managed blocks (legacy duplicate from a buggy past install)
-H=$(mk_home); cat > "$H/.bashrc" <<DUPE
+# T3: a pre-existing rc with the old managed PATH block gets cleaned up.
+H=$(mk_home)
+cat > "$H/.bashrc" <<RCFILE
+alias ll="ls -la"
 # >>> opencode-anycli (managed by install.sh) >>>
-export PATH="/old1:\$PATH"
+export PATH="/some/old/path:\$PATH"
 # <<< opencode-anycli (managed by install.sh) <<<
-some other config
+export EDITOR=vim
+RCFILE
+out=$(run_install "$H")
+assert_eq "T3 managed block stripped from .bashrc" "$(managed_blocks "$H/.bashrc")" "0"
+assert_eq "T3 unrelated alias preserved"           "$(grep -c 'alias ll' "$H/.bashrc")" "1"
+assert_eq "T3 unrelated EDITOR preserved"          "$(grep -c 'EDITOR=vim' "$H/.bashrc")" "1"
+assert_contains "T3 install logs the cleanup"      "$out" "removed legacy managed PATH block"
+rm -rf "$H"
+
+# T4: legacy block in BOTH .bashrc AND .zshrc — both get stripped in one pass.
+H=$(mk_home)
+cat > "$H/.bashrc" <<RCFILE
 # >>> opencode-anycli (managed by install.sh) >>>
-export PATH="/old2:\$PATH"
+export PATH="/old/bash:\$PATH"
 # <<< opencode-anycli (managed by install.sh) <<<
-DUPE
+RCFILE
+cat > "$H/.zshrc" <<RCFILE
+# >>> opencode-anycli (managed by install.sh) >>>
+export PATH="/old/zsh:\$PATH"
+# <<< opencode-anycli (managed by install.sh) <<<
+RCFILE
 out=$(run_install "$H")
-assert_eq "T7 duplicate blocks consolidated to 1" "$(managed_blocks "$H/.bashrc")" "1"
-assert_eq "T7 final path correct" "$(exported_path "$H/.bashrc")" \
-  "export PATH=\"$EXP_BIN:\$PATH\""
-assert_eq "T7 unrelated 'some other config' kept" \
-  "$(grep -c 'some other config' "$H/.bashrc")" "1"
+assert_eq "T4 legacy block cleared from .bashrc" "$(managed_blocks "$H/.bashrc")" "0"
+assert_eq "T4 legacy block cleared from .zshrc" "$(managed_blocks "$H/.zshrc")"  "0"
 rm -rf "$H"
 
-
-# ─── Section 4: install.sh — shell detection ─────────────────────────────────
-section "install.sh: shell detection"
-
-# T8: zsh → uses .zshrc
-H=$(mk_home); : > "$H/.zshrc"
-out=$(run_install_zsh "$H")
-assert_eq "T8 zsh → .zshrc has 1 block" "$(managed_blocks "$H/.zshrc")" "1"
-assert_eq "T8 zsh → .bashrc untouched (still no block)" "$(managed_blocks "$H/.bashrc")" "0"
-rm -rf "$H"
-
-# T9: zsh with ZDOTDIR
-H=$(mk_home); mkdir -p "$H/zdot"
-HOME="$H" XDG_CONFIG_HOME="$H/.config" ZDOTDIR="$H/zdot" SHELL=/bin/zsh \
-  bash "$INSTALL" --skip-build >/dev/null 2>&1
-assert_eq "T9 zsh ZDOTDIR → \$ZDOTDIR/.zshrc has 1 block" \
-  "$(managed_blocks "$H/zdot/.zshrc")" "1"
-assert_eq "T9 zsh ZDOTDIR → \$HOME/.zshrc untouched" \
-  "$(managed_blocks "$H/.zshrc" 2>/dev/null || echo 0)" "0"
-rm -rf "$H"
-
-# T10: fish → uses ~/.config/fish/config.fish + fish_add_path
-H=$(mk_home); mkdir -p "$H/.config/fish"; : > "$H/.config/fish/config.fish"
-out=$(run_install_fish "$H")
-fish_block=$(grep -A1 "managed by install.sh" "$H/.config/fish/config.fish" | grep "fish_add_path" || true)
-assert_contains "T10 fish → uses fish_add_path syntax" "$fish_block" "fish_add_path"
-assert_eq "T10 fish → 1 managed block" \
-  "$(managed_blocks "$H/.config/fish/config.fish")" "1"
-rm -rf "$H"
-
-# T11: unknown shell (csh) → warns + no rc file modified
-H=$(mk_home); : > "$H/.bashrc"; : > "$H/.zshrc"
-out=$(run_install_unknown "$H")
-assert_contains "T11 unknown shell → warning printed" "$out" "Could not auto-configure PATH for shell"
-assert_eq "T11 unknown shell → .bashrc untouched" "$(managed_blocks "$H/.bashrc")" "0"
-assert_eq "T11 unknown shell → .zshrc untouched" "$(managed_blocks "$H/.zshrc")" "0"
-rm -rf "$H"
-
-
-# ─── Section 5: install.sh — file-edge cases ─────────────────────────────────
-section "install.sh: file edge cases"
-
-# T12: rc file ends WITHOUT trailing newline → install must add newline before block
-H=$(mk_home); printf 'last line no newline' > "$H/.bashrc"
-out=$(run_install "$H")
-assert_eq "T12 last existing line preserved" "$(grep -c 'last line no newline' "$H/.bashrc")" "1"
-assert_eq "T12 1 managed block" "$(managed_blocks "$H/.bashrc")" "1"
-# The 'last line no newline' should appear on its own line, not concatenated
-last=$(head -1 "$H/.bashrc")
-assert_eq "T12 first line still 'last line no newline'" "$last" "last line no newline"
-rm -rf "$H"
-
-# T13: deprecated --user --sudo flags accepted as no-ops
-H=$(mk_home)
-out=$(run_install "$H" --user --sudo)
-assert_contains "T13 --user / --sudo prints deprecation note" "$out" "no-ops with the new PATH-based install"
-assert_eq "T13 --user --sudo → still 1 block" "$(managed_blocks "$H/.bashrc")" "1"
-rm -rf "$H"
-
-# T13b: apply hint shown on first install (PATH lacks BIN_DIR in test shell)
-H=$(mk_home)
-out=$(run_install "$H")
-assert_contains "T13b first install → 'Apply the new PATH' hint printed" "$out" "Apply the new PATH in this shell"
-assert_contains "T13b first install → exact 'source <rc>' command suggested" "$out" "source $H/.bashrc"
-rm -rf "$H"
-
-# T13c: apply hint NOT shown when current shell ALREADY has BIN_DIR on PATH
-H=$(mk_home)
-# Add BIN_DIR to the test shell's PATH before invoking install — should
-# detect "already loaded" and skip the hint.
-out=$(HOME="$H" XDG_CONFIG_HOME="$H/.config" SHELL=/bin/bash \
-  PATH="$EXP_BIN:$PATH" bash "$INSTALL" --skip-build 2>&1)
-assert_eq "T13c PATH already has BIN_DIR → no apply hint" \
-  "$(printf '%s' "$out" | grep -c 'Apply the new PATH')" "0"
-rm -rf "$H"
-
-
-# ─── Section 6: uninstall.sh — block removal ─────────────────────────────────
-section "uninstall.sh"
-
-# T14: uninstall removes managed block, leaves other content intact
-H=$(mk_home); printf 'alias x=y\n' > "$H/.bashrc"
-run_install "$H" >/dev/null
-[ "$(managed_blocks "$H/.bashrc")" = "1" ] || { FAIL=$((FAIL+1)); echo "  ✗ T14 setup failed"; }
-out=$(run_uninstall "$H")
-assert_eq "T14 uninstall → 0 managed blocks" "$(managed_blocks "$H/.bashrc")" "0"
-assert_eq "T14 unrelated 'alias x=y' kept" "$(grep -c 'alias x=y' "$H/.bashrc")" "1"
-rm -rf "$H"
-
-# T15: uninstall on rc with NO managed block — no-op, file untouched
+# T5: no legacy block anywhere → install reports "nothing to clean up"
+#     without touching the rc files.
 H=$(mk_home); printf 'alias z=zz\n' > "$H/.bashrc"
 before=$(cat "$H/.bashrc")
-out=$(run_uninstall "$H")
+out=$(run_install "$H")
 after=$(cat "$H/.bashrc")
-assert_eq "T15 rc without block unchanged after uninstall" "$before" "$after"
-assert_contains "T15 prints 'no managed block'" "$out" "no managed block"
+assert_eq "T5 rc without legacy block left untouched" "$before" "$after"
+assert_contains "T5 install logs no-legacy info"       "$out"   "no legacy PATH blocks to clean up"
 rm -rf "$H"
 
-# T16: uninstall removes blocks from BOTH .bashrc AND .zshrc in one pass
-H=$(mk_home); : > "$H/.bashrc"
+
+# ─── Section 3: install.sh — flag plumbing ──────────────────────────────────
+section "install.sh: deprecated flags"
+
+# T6: --user / --sudo accepted (kept for backward compat with
+#     `opencode-anycli --update --user`). --user is a pure no-op; --sudo
+#     still forces sudo on auto_npm_install upstream. Link still produced.
+H=$(mk_home)
+out=$(run_install "$H" --user --sudo)
+assert_contains "T6 --user note printed" "$out" "is a no-op with the npm-link install"
+assert_contains "T6 --sudo note printed" "$out" "npm link does not use it unless it hits EACCES"
+assert_eq "T6 --user --sudo: symlink still created" "$(link_exists "$H")" "yes"
+rm -rf "$H"
+
+
+# ─── Section 4: uninstall.sh — npm unlink + legacy cleanup ──────────────────
+section "uninstall.sh"
+
+# T8: install then uninstall → global symlink is gone.
+H=$(mk_home)
 run_install "$H" >/dev/null
-: > "$H/.zshrc"
-run_install_zsh "$H" >/dev/null
-[ "$(managed_blocks "$H/.bashrc")" = "1" ] || { FAIL=$((FAIL+1)); echo "  ✗ T16 setup .bashrc"; }
-[ "$(managed_blocks "$H/.zshrc")" = "1" ] || { FAIL=$((FAIL+1)); echo "  ✗ T16 setup .zshrc"; }
+assert_eq "T8 setup: link exists pre-uninstall" "$(link_exists "$H")" "yes"
 out=$(run_uninstall "$H")
-assert_eq "T16 .bashrc cleared" "$(managed_blocks "$H/.bashrc")" "0"
-assert_eq "T16 .zshrc cleared" "$(managed_blocks "$H/.zshrc")" "0"
+assert_eq "T8 uninstall: link removed"          "$(link_exists "$H")" "no"
+assert_contains "T8 uninstall logs npm unlink"  "$out" "npm unlink -g opencode-anycli"
 rm -rf "$H"
 
-# T17a: legacy symlink in user-writable ~/.local/bin → removed without sudo
+# T9: uninstall on a host with NO prior install → succeeds gracefully.
 H=$(mk_home)
-ln -sf /tmp/fake-target "$H/.local/bin/opencode-anycli"
-out=$(run_uninstall_user_scope "$H")
-assert_eq "T17a legacy symlink in user dir → removed cleanly" \
-  "$([ -L "$H/.local/bin/opencode-anycli" ] && echo present || echo gone)" "gone"
-assert_eq "T17a no leftover banner when removal succeeded" \
+out=$(run_uninstall "$H")
+assert_eq "T9 nothing to unlink: no leftover binaries banner" \
   "$(printf '%s' "$out" | grep -c 'could not be removed')" "0"
 rm -rf "$H"
 
-# T17b: nothing on disk anywhere (--user scope so /usr/local/bin isn't touched)
+# T10: legacy PATH block stripping during uninstall (covers users on the
+#      old install scheme who run the new uninstall).
 H=$(mk_home)
-out=$(run_uninstall_user_scope "$H")
-assert_eq "T17b nothing to remove → no leftover banner" \
-  "$(printf '%s' "$out" | grep -c 'could not be removed')" "0"
+cat > "$H/.bashrc" <<RCFILE
+alias x=y
+# >>> opencode-anycli (managed by install.sh) >>>
+export PATH="/legacy:\$PATH"
+# <<< opencode-anycli (managed by install.sh) <<<
+RCFILE
+out=$(run_uninstall "$H")
+assert_eq "T10 uninstall strips legacy block"        "$(managed_blocks "$H/.bashrc")" "0"
+assert_eq "T10 unrelated 'alias x=y' preserved"      "$(grep -c 'alias x=y' "$H/.bashrc")" "1"
 rm -rf "$H"
 
-# T17c: --no-symlink keeps any binary intact (intentional partial uninstall)
+# T11: uninstall removes legacy blocks from BOTH .bashrc and .zshrc in one pass.
 H=$(mk_home)
-ln -sf /tmp/fake-target "$H/.local/bin/opencode-anycli"
-HOME="$H" XDG_CONFIG_HOME="$H/.config" \
-  bash "$UNINSTALL" --no-symlink --yes 2>&1 >/dev/null
-assert_eq "T17c --no-symlink keeps the symlink intact" \
-  "$([ -L "$H/.local/bin/opencode-anycli" ] && echo present || echo gone)" "present"
+cat > "$H/.bashrc" <<RCFILE
+# >>> opencode-anycli (managed by install.sh) >>>
+export PATH="/leg/bash:\$PATH"
+# <<< opencode-anycli (managed by install.sh) <<<
+RCFILE
+cat > "$H/.zshrc" <<RCFILE
+# >>> opencode-anycli (managed by install.sh) >>>
+export PATH="/leg/zsh:\$PATH"
+# <<< opencode-anycli (managed by install.sh) <<<
+RCFILE
+out=$(run_uninstall "$H")
+assert_eq "T11 .bashrc legacy block cleared" "$(managed_blocks "$H/.bashrc")" "0"
+assert_eq "T11 .zshrc legacy block cleared"  "$(managed_blocks "$H/.zshrc")"  "0"
 rm -rf "$H"
 
-# T17: uninstall with multiple managed blocks (legacy state) → all removed
+# T12: uninstall strips MULTIPLE duplicate legacy blocks in one pass.
 H=$(mk_home); cat > "$H/.bashrc" <<DUPE
 # >>> opencode-anycli (managed by install.sh) >>>
 export PATH="/dup1:\$PATH"
@@ -336,15 +261,35 @@ export PATH="/dup2:\$PATH"
 # <<< opencode-anycli (managed by install.sh) <<<
 DUPE
 out=$(run_uninstall "$H")
-assert_eq "T17 all duplicate blocks removed" "$(managed_blocks "$H/.bashrc")" "0"
-assert_eq "T17 'keep me' preserved" "$(grep -c 'keep me' "$H/.bashrc")" "1"
+assert_eq "T12 all duplicate legacy blocks removed" "$(managed_blocks "$H/.bashrc")" "0"
+assert_eq "T12 'keep me' preserved"                  "$(grep -c 'keep me' "$H/.bashrc")" "1"
+rm -rf "$H"
+
+# T13a: legacy symlink in user-writable ~/.local/bin → removed without sudo.
+H=$(mk_home)
+ln -sf /tmp/fake-target "$H/.local/bin/opencode-anycli"
+out=$(run_uninstall_user_scope "$H")
+assert_eq "T13a legacy ~/.local/bin/opencode-anycli removed" \
+  "$([ -L "$H/.local/bin/opencode-anycli" ] && echo present || echo gone)" "gone"
+assert_eq "T13a no leftover banner when removal succeeded" \
+  "$(printf '%s' "$out" | grep -c 'could not be removed')" "0"
+rm -rf "$H"
+
+# T13b: --no-symlink keeps any legacy binary intact (intentional partial uninstall).
+H=$(mk_home)
+ln -sf /tmp/fake-target "$H/.local/bin/opencode-anycli"
+HOME="$H" XDG_CONFIG_HOME="$H/.config" \
+  npm_config_prefix="$H/npm-prefix" \
+  bash "$UNINSTALL" --no-symlink --yes 2>&1 >/dev/null
+assert_eq "T13b --no-symlink keeps the legacy symlink intact" \
+  "$([ -L "$H/.local/bin/opencode-anycli" ] && echo present || echo gone)" "present"
 rm -rf "$H"
 
 
-# ─── Section 7: --update auto-stash flow (live, against a clone) ─────────────
+# ─── Section 5: --update auto-stash flow (live, against a clone) ─────────────
 section "--update auto-stash"
 
-# T18-T20 setup: clone repo to /tmp, do work in there, drive --update via the
+# T14-T16 setup: clone repo to /tmp, do work in there, drive --update via the
 # current binary against that working tree.
 WORK=$(mktemp -d /tmp/install-test-update-XXXXXXXX)
 cp -r "$REPO" "$WORK/repo"
@@ -352,13 +297,11 @@ cd "$WORK/repo"
 git remote remove origin 2>/dev/null || true
 git remote add origin "$REPO"
 
-# T18: clean tree → no stash, normal pull (already-up-to-date here is fine)
-out=$("$REPO/packages/cli/bin/opencode-anycli" --update --skip-build 2>&1 || true)
 # We're invoking the real binary which walks up to find install.sh — it'll
-# update the REAL repo, not our clone. So this T18 is about the real-repo
+# update the REAL repo, not our clone. So this is about the real-repo
 # clean-tree behavior, which we already tested by hand. Skip programmatic
-# T18-T20 here — just note coverage was done live earlier.
-echo "  (T18-T20 --update auto-stash flow covered by earlier live runs:"
+# T14-T16 here — just note coverage was done live earlier.
+echo "  (T14-T16 --update auto-stash flow covered by earlier live runs:"
 echo "     dirty → stash → pull → install → pop ✓"
 echo "     clean → no stash, no-op pull, install ✓"
 echo "     pop conflict → stash@{0} preserved with recovery hint ✓ logic-only)"

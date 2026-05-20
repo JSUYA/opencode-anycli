@@ -21,7 +21,20 @@ cd opencode-anycli
 ./install.sh
 ```
 
-The installer checks Node, opencode, and cline, builds the workspace, writes the default `opencode.json` and `tui.json`, and adds the repo's `packages/cli/bin` directory to your shell rc file with a managed PATH block.
+The installer checks Node, opencode, and cline, builds the workspace, writes the default `opencode.json` and `tui.json`, and runs `npm link` from `packages/cli/` to symlink the `opencode-anycli` binary into your active Node's global bin directory (e.g. `~/.nvm/versions/node/<ver>/bin/opencode-anycli`). That directory is already on `PATH` for any working Node install, so no `source ~/.bashrc` step is needed.
+
+Any legacy `export PATH=…` block previously appended to `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish` by older installers is removed automatically on every run.
+
+### Manual link (no install.sh)
+
+If the build is already in place and you only need the binary symlinked, you can run the same `npm link` step yourself:
+
+```bash
+cd packages/cli
+npm link
+```
+
+`npm unlink -g opencode-anycli` (run from the same directory) reverses it.
 
 ## Options
 
@@ -52,4 +65,4 @@ cd opencode-anycli
 ./install.sh --skip-build
 ```
 
-`--user` is accepted for compatibility but no longer changes the install location; the PATH block is always used.
+`--user` is accepted for compatibility but no longer changes the install location; `npm link` is always used.
