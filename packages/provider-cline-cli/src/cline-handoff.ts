@@ -322,7 +322,18 @@ function stringifyContent(
         if (typeof p.text === "string") out.push(p.text)
         break
       case "tool-call":
-        out.push(`<tool-call name="${String(p.toolName ?? "")}">${safeJson((p as { args?: unknown }).args)}</tool-call>`)
+        // Field-name compat: AI SDK V3 uses `input`; older shapes (and our own
+        // historical tests/fixtures) carry `args`. Read both so the loop guard
+        // in opencode-call-parser sees `"name":"<id>"` regardless of source.
+        // Normalize: if the value is a JSON-string (some SDKs pre-stringify the
+        // tool-call input), parse it so the rendered tag carries an object
+        // literal — not a double-escaped string — which the loop-guard regex
+        // matches as `"name":"X"`.
+        out.push(
+          `<tool-call name="${String(p.toolName ?? "")}">${safeJson(
+            normalizeToolCallInput(p as { input?: unknown; args?: unknown }),
+          )}</tool-call>`,
+        )
         break
       case "tool-result":
         if (options.summarizeToolResults) {
@@ -473,5 +484,15 @@ function safeJson(value: unknown): string {
     return JSON.stringify(value)
   } catch {
     return String(value)
+  }
+}
+
+function normalizeToolCallInput(part: { input?: unknown; args?: unknown }): unknown {
+  const raw = part.input !== undefined ? part.input : part.args
+  if (typeof raw !== "string") return raw
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
   }
 }
