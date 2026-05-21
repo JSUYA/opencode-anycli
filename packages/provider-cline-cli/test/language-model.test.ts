@@ -1317,6 +1317,133 @@ describe("ClineLanguageModel", () => {
     }
   })
 
+  it("loop guard fires when prior assistant tool-call uses AI SDK V3 `input` field (not legacy `args`)", async () => {
+    // Regression: AI SDK V3 tool-call parts carry `input`, not `args`. The
+    // handoff serializer must read both shapes — otherwise the loop guard
+    // sees `<tool-call name="skill">undefined</tool-call>`, fails to match
+    // the prior `"name":"X"`, and re-emits the same skill tool-call every
+    // turn. Symptom: opencode TUI repeats `-> Skill "<id>"` indefinitely.
+    const dir = mkdtempSync(join(tmpdir(), "cline-loop-guard-input-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: 'follow-up answer', partial: false }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<command-instruction>\nRun the `karpathy-guidelines` skill workflow on the user's request.\n</command-instruction>\nDo the thing.",
+              },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                // V3 shape: `input` (object), no `args`.
+                type: "tool-call",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                input: { name: "karpathy-guidelines" },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                output: { name: "karpathy-guidelines", loaded: true },
+              },
+            ],
+          },
+        ],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+
+      expect(result.finishReason).toMatchObject({ unified: "stop" })
+      expect(result.content[0]).toMatchObject({ type: "text", text: "follow-up answer" })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("loop guard fires when prior assistant tool-call `input` is a JSON string (V3 stringified shape)", async () => {
+    // Some SDK versions / providers pre-stringify the tool-call input. The
+    // handoff must JSON.parse string payloads so the rendered tag carries
+    // an object literal — otherwise the value comes through escaped as
+    // `"{\"name\":\"X\"}"` and the loop-guard regex misses `"name":"X"`.
+    const dir = mkdtempSync(join(tmpdir(), "cline-loop-guard-strinput-"))
+    const fakeCline = join(dir, "cline")
+    writeFileSync(
+      fakeCline,
+      [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({ type: 'say', say: 'completion_result', text: 'follow-up answer', partial: false }) + '\\n')",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(fakeCline, 0o755)
+    try {
+      const model = new ClineLanguageModel("default", { command: fakeCline, timeoutMs: 5000 })
+      const result = await model.doGenerate({
+        prompt: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "<command-instruction>\nRun the `karpathy-guidelines` skill workflow on the user's request.\n</command-instruction>",
+              },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                input: JSON.stringify({ name: "karpathy-guidelines" }),
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "prev-1",
+                toolName: "skill",
+                output: { name: "karpathy-guidelines", loaded: true },
+              },
+            ],
+          },
+        ],
+        tools: [{ type: "function", name: "skill" }],
+      } as unknown as Parameters<typeof model.doGenerate>[0])
+
+      expect(result.finishReason).toMatchObject({ unified: "stop" })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("does NOT bypass when the `skill` tool isn't registered (falls through to normal cline flow)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cline-skill-no-bypass-"))
     const fakeCline = join(dir, "cline")
