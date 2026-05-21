@@ -74,7 +74,14 @@ function stringifyContent(content: unknown): string {
         if (typeof p.text === "string") out.push(p.text)
         break
       case "tool-call":
-        out.push(`<tool-call name="${String(p.toolName ?? "")}">${safeJson((p as { args?: unknown }).args)}</tool-call>`)
+        // Read both `input` (AI SDK V3) and `args` (legacy/test shape). Parse
+        // string payloads so the rendered JSON is an object literal — keeps
+        // downstream regex matchers (loop guard) stable across SDK versions.
+        out.push(
+          `<tool-call name="${String(p.toolName ?? "")}">${safeJson(
+            normalizeToolCallInput(p as { input?: unknown; args?: unknown }),
+          )}</tool-call>`,
+        )
         break
       case "tool-result":
         out.push(`<tool-result name="${String(p.toolName ?? "")}">${safeJson(p.output)}</tool-result>`)
@@ -100,5 +107,15 @@ function safeJson(value: unknown): string {
     return JSON.stringify(value)
   } catch {
     return String(value)
+  }
+}
+
+function normalizeToolCallInput(part: { input?: unknown; args?: unknown }): unknown {
+  const raw = part.input !== undefined ? part.input : part.args
+  if (typeof raw !== "string") return raw
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
   }
 }
