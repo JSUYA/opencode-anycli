@@ -330,9 +330,14 @@ export function isSkillAlreadyDispatchedInHandoff(
   // Match `<tool-call name="skill">` followed (within reasonable bytes)
   // by `"name":"<skillName>"`. We cap the inter-token distance so we
   // don't cross into a later, unrelated tool-call.
+  // 
+  // Increased from 400 → 2000 → 5000 to handle longer tool-result content
+  // between dispatches. This prevents infinite loops when the same skill
+  // is re-dispatched due to the guard missing a prior dispatch that was
+  // separated by more bytes (e.g., long tool-result content between calls).
   const escaped = skillName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   const re = new RegExp(
-    `<tool-call name="skill">[^<]{0,400}"name":"${escaped}"`,
+    `<tool-call name="skill">[^<]{0,5000}"name":"${escaped}"`,
   )
   return re.test(handoffText)
 }

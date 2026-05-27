@@ -34,6 +34,88 @@ import type { ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
 
 const DEFAULT_TIMEOUT_MS = 3_600_000
 
+/**
+ * Maximum number of tool-call turns before forcing a stop.
+ * Prevents infinite loops when cline keeps generating new tool-calls
+ * in a cycle. Can be overridden via OPENCODE_ANYCLI_MAX_TURNS env var.
+ */
+const DEFAULT_MAX_TURNS = 15
+
+/**
+ * Count tool-call/tool-result pairs in the prompt history to detect
+ * potential infinite loops. Returns the number of turns so far.
+ */
+function countTurnsInPrompt(prompt: ReadonlyArray<unknown>): number {
+  let turnCount = 0
+  for (const message of prompt) {
+    if (typeof message === "object" && message !== null) {
+      const msg = message as Record<string, unknown>
+      const content = msg["content"] as unknown
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (typeof part === "object" && part !== null) {
+            const p = part as Record<string, unknown>
+            // Count both tool-call and tool-result as part of a turn
+            if (p["type"] === "tool-call" || p["type"] === "tool-result") {
+              turnCount++
+            }
+          }
+        }
+      }
+    }
+  }
+  // Each turn has 2 events (call + result), so divide by 2
+  return Math.floor(turnCount / 2)
+}
+
+/**
+ * Create a hash signature for a tool-call to detect duplicates.
+ * Returns a JSON string of toolName + sorted input keys for comparison.
+ */
+function createToolCallSignature(toolName: string, input: unknown): string {
+  try {
+    const sortedInput = JSON.stringify(input, Object.keys(input as object).sort())
+    return JSON.stringify({ toolName, input: sortedInput })
+  } catch {
+    return JSON.stringify({ toolName, input: String(input) })
+  }
+}
+
+/**
+ * Check if a tool-call signature was already seen in this session.
+ * Used to detect infinite loops where cline keeps generating the same tool-call.
+ */
+function isDuplicateToolCall(previousToolCalls: Set<string>, toolName: string, input: unknown): boolean {
+  const signature = createToolCallSignature(toolName, input)
+  return previousToolCalls.has(signature)
+}
+
+/**
+ * Track a tool-call signature to detect future duplicates.
+ * Call this after emitting a tool-call to prevent infinite loops.
+ * 
+ * Implements FIFO eviction when the cache exceeds MAX_TOOL_CALL_CACHE entries
+ * to prevent unbounded memory growth in long-running sessions.
+ */
+function trackToolCall(
+  previousToolCalls: Set<string>,
+  toolName: string,
+  input: unknown,
+  maxCacheSize: number = 100,
+): void {
+  const signature = createToolCallSignature(toolName, input)
+  
+  // FIFO eviction: remove oldest entry if cache is full
+  if (previousToolCalls.size >= maxCacheSize) {
+    const firstKey = previousToolCalls.values().next().value
+    if (firstKey !== undefined) {
+      previousToolCalls.delete(firstKey)
+    }
+  }
+  
+  previousToolCalls.add(signature)
+}
+
 export class ClineLanguageModel implements LanguageModelV3 {
   readonly specificationVersion = "v3"
   readonly provider = "cline"
@@ -48,6 +130,17 @@ export class ClineLanguageModel implements LanguageModelV3 {
     cwd: string | undefined
     env: Record<string, string> | undefined
   }
+
+/**
+ * Track previous tool-call hashes to detect duplicate tool-calls
+ * that could indicate an infinite loop. Stores JSON-stringified
+ * tool-call signatures (toolName + input hash).
+ * 
+ * Limited to MAX_TOOL_CALL_CACHE entries to prevent unbounded memory growth.
+ * When the limit is exceeded, oldest entries are removed (FIFO eviction).
+ */
+private readonly previousToolCalls = new Set<string>()
+private static readonly MAX_TOOL_CALL_CACHE = 100
 
   constructor(modelId: string, options: ClineProviderOptions = {}) {
     this.modelId = modelId
@@ -77,6 +170,21 @@ export class ClineLanguageModel implements LanguageModelV3 {
     })
     const promptText = handoff.text
     logPromptDebug("generate", options.prompt as ReadonlyArray<unknown>, promptText, handoff.diagnostics)
+
+    // Infinite loop prevention: check if we've exceeded max turns
+    const maxTurns = parseInt(process.env["OPENCODE_ANYCLI_MAX_TURNS"] ?? String(DEFAULT_MAX_TURNS), 10)
+    const currentTurns = countTurnsInPrompt(options.prompt as ReadonlyArray<unknown>)
+    if (currentTurns >= maxTurns) {
+      // Force stop to prevent infinite loop
+      return {
+        content: [{ type: "text", text: `[opencode-anycli] Maximum turns (${maxTurns}) reached. Stopping to prevent infinite loop. Use OPENCODE_ANYCLI_MAX_TURNS env var to increase limit if needed.` }],
+        finishReason: { unified: "stop", raw: "max-turns-reached" },
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, totalCost: undefined } as any,
+        warnings: [],
+        response: { id: cryptoRandomId(), timestamp: new Date(), modelId: this.modelId },
+        providerMetadata: { cline: { parseErrors: 0, modelLabel: this.modelId, opencodeCalls: 0, maxTurnsReached: true } },
+      }
+    }
 
     // Slash-command bypass: opencode rewrites `/<skill>` user input into a
     // `<command-instruction>` block that tells the model "Run the X skill
@@ -130,9 +238,22 @@ export class ClineLanguageModel implements LanguageModelV3 {
       registeredToolNames.size > 0
         ? parseOpencodeCallsOnce(result.text, registeredToolNames)
         : { text: result.text, calls: [] }
+    
+    // Filter out duplicate tool-calls to prevent infinite loops
+    const uniqueCalls: OpencodeCall[] = []
+    const duplicateCallCount = { count: 0 }
+    for (const call of parsed.calls) {
+      if (isDuplicateToolCall(this.previousToolCalls, call.toolName, call.input)) {
+        duplicateCallCount.count++
+        continue
+      }
+      trackToolCall(this.previousToolCalls, call.toolName, call.input, ClineLanguageModel.MAX_TOOL_CALL_CACHE)
+      uniqueCalls.push(call)
+    }
+    
     const content: Array<LanguageModelV3StreamPart | { type: "text"; text: string } | { type: "tool-call"; toolCallId: string; toolName: string; input: string }> = []
     if (parsed.text.length > 0) content.push({ type: "text", text: parsed.text })
-    for (const call of parsed.calls) {
+    for (const call of uniqueCalls) {
       content.push({
         type: "tool-call",
         toolCallId: cryptoToolCallId(),
@@ -141,9 +262,9 @@ export class ClineLanguageModel implements LanguageModelV3 {
       })
     }
     const finishReason: LanguageModelV3FinishReason =
-      parsed.calls.length > 0
+      uniqueCalls.length > 0
         ? { unified: "tool-calls", raw: undefined }
-        : { unified: "stop", raw: undefined }
+        : { unified: "stop", raw: duplicateCallCount.count > 0 ? "duplicate-tool-calls-filtered" : undefined }
 
     return {
       // The union above keeps the types narrow; cast at the boundary to the
@@ -171,6 +292,46 @@ export class ClineLanguageModel implements LanguageModelV3 {
   async doStream(options: LanguageModelV3CallOptions): Promise<Awaited<ReturnType<LanguageModelV3["doStream"]>>> {
     if (this.options.mode === "passthrough") {
       throw new Error("Passthrough mode not yet implemented — see docs/provider-modes.md")
+    }
+
+    // Infinite loop prevention: check if we've exceeded max turns
+    const maxTurns = parseInt(process.env["OPENCODE_ANYCLI_MAX_TURNS"] ?? String(DEFAULT_MAX_TURNS), 10)
+    const currentTurns = countTurnsInPrompt(options.prompt as ReadonlyArray<unknown>)
+    if (currentTurns >= maxTurns) {
+      // Return a one-shot stream that immediately finishes with max-turns-reached
+      const responseId = cryptoRandomId()
+      const currentModelId = this.modelId
+      return {
+        stream: new ReadableStream<LanguageModelV3StreamPart>({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] })
+            controller.enqueue({
+              type: "response-metadata",
+              id: responseId,
+              timestamp: new Date(),
+              modelId: currentModelId,
+            })
+            controller.enqueue({
+              type: "text-delta",
+              id: "text-0",
+              delta: `[opencode-anycli] Maximum turns (${maxTurns}) reached. Stopping to prevent infinite loop. Use OPENCODE_ANYCLI_MAX_TURNS env var to increase limit if needed.`,
+            })
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "stop", raw: "max-turns-reached" },
+              usage: {
+                inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 0, text: 0, reasoning: 0 },
+              },
+              providerMetadata: {
+                cline: { parseErrors: 0, modelLabel: currentModelId, opencodeCalls: 0, maxTurnsReached: true },
+              },
+            })
+            controller.close()
+          },
+        }),
+        response: { headers: {} },
+      }
     }
 
     const tools = extractTools(options)
@@ -227,6 +388,11 @@ export class ClineLanguageModel implements LanguageModelV3 {
       else options.abortSignal.addEventListener("abort", () => internalAbort.abort(), { once: true })
     }
     let streamCancelled = false
+
+    // Capture `this` for use in the closure (stream start function)
+    // Must be done before creating the ReadableStream to avoid TypeScript
+    // inferring the wrong `this` type inside the start function.
+    const thisInstance = this
 
     const stream = new ReadableStream<LanguageModelV3StreamPart>({
       async start(controller) {
@@ -289,6 +455,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
         }
         let parseErrors = 0
         let emittedOpencodeCallCount = 0
+        let duplicateCallCount = 0
         const parser = parserActive ? new OpencodeCallParser() : null
         const emitOpencodeCalls = (calls: ReadonlyArray<OpencodeCall>) => {
           for (const call of calls) {
@@ -301,6 +468,12 @@ export class ClineLanguageModel implements LanguageModelV3 {
               safeEnqueue({ type: "text-delta", id, delta: fallback })
               continue
             }
+            // Check for duplicate tool-calls to prevent infinite loops
+            if (isDuplicateToolCall(thisInstance.previousToolCalls, call.toolName, call.input)) {
+              duplicateCallCount++
+              continue
+            }
+            trackToolCall(thisInstance.previousToolCalls, call.toolName, call.input, ClineLanguageModel.MAX_TOOL_CALL_CACHE)
             closeTextBlock()
             safeEnqueue({
               type: "tool-call",
@@ -395,14 +568,16 @@ export class ClineLanguageModel implements LanguageModelV3 {
           //     provider-executed by cline itself; re-feeding them caused
           //     infinite re-prompt loops in earlier testing.
           //   - no tool-calls of any kind → "stop": normal terminal answer.
+          //   - duplicate tool-calls filtered → "stop": prevent infinite loops
+          //     when cline keeps generating the same tool-call repeatedly.
           safeEnqueue({
             type: "finish",
             finishReason: emittedOpencodeCallCount > 0
               ? { unified: "tool-calls", raw: undefined }
-              : { unified: "stop", raw: undefined },
+              : { unified: "stop", raw: duplicateCallCount > 0 ? "duplicate-tool-calls-filtered" : undefined },
             usage: toV3Usage(usage),
             providerMetadata: {
-              cline: { parseErrors, modelLabel: modelId, opencodeCalls: emittedOpencodeCallCount },
+              cline: { parseErrors, modelLabel: modelId, opencodeCalls: emittedOpencodeCallCount, duplicateCallCount },
             },
           })
           safeClose()
