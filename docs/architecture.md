@@ -1,6 +1,12 @@
 # Architecture
 
-OpenCode-AnyCLI adapts opencode model requests to the local cline CLI.
+OpenCode-AnyCLI adapts opencode model requests to a local coding CLI. The same
+provider package drives three flavors, selected by the `cli` provider option:
+`cline` (default), `claude`, and `codex`. cline can run via NDJSON subprocess or
+`--acp`; claude and codex run as subprocess stream-json sessions
+(`cli-profiles.ts` builds their argv + parses their JSON, `stream-json-runner.ts`
+is the shared subprocess engine). All flavors emit the same internal
+`StreamEvent` shape, so `language-model.ts` maps them to opencode the same way.
 
 ## Flow
 

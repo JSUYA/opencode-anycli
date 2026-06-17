@@ -1,6 +1,11 @@
 # Provider Modes
 
-`provider-cline-cli` supports three mode values. `subprocess` is the default, `acp` is implemented as an opt-in transport, and `passthrough` is planned.
+The provider drives one of three CLIs, selected by the `cli` option
+(`cline` / `claude` / `codex`). cline supports the three `mode` values below;
+claude and codex always run as subprocess stream-json sessions (see the last
+section).
+
+`provider-cline-cli` supports three mode values for cline. `subprocess` is the default, `acp` is implemented as an opt-in transport, and `passthrough` is planned.
 
 ## Subprocess
 
@@ -17,6 +22,20 @@ ACP requires cline 2.18 or newer. Older cline versions do not ship the `--acp` t
 ## Passthrough
 
 Passthrough mode is planned. It would read cline settings and call the configured model directly from opencode. This can reduce agent-on-agent overhead, but requires more coupling to cline's internal configuration format.
+
+## Claude / Codex (subprocess stream-json)
+
+Selecting a `claude/*` or `codex/*` model drives the matching CLI as a
+subprocess that streams line-delimited JSON:
+
+- claude: `claude -p --output-format stream-json --include-partial-messages --verbose --model <model> --effort <level> --permission-mode bypassPermissions`
+- codex: `codex exec --json -m <model> -c model_reasoning_effort=<level> --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check`
+
+The flattened prompt is delivered on stdin (no argv length ceiling), the model
+and reasoning effort come from the model id (e.g. `opus-4.8-max`,
+`gpt-5.5-xhigh`), and the yolo permission bypass is applied automatically.
+Neither CLI has a native `--acp` transport, so `mode` does not apply to them;
+they use the existing local OAuth login for credentials.
 
 ## Recommendation
 

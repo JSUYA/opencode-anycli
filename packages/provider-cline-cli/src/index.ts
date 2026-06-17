@@ -9,11 +9,20 @@
 export { createCline, cline } from "./provider.js"
 export type { ClineProvider } from "./provider.js"
 export { ClineLanguageModel } from "./language-model.js"
-export type { ClineProviderOptions, ClineMode, ClineEvent, RunResult } from "./types.js"
+export type { ClineProviderOptions, ClineMode, CliFlavor, ClineEvent, RunResult } from "./types.js"
 export { readGlobalState, defaultClineConfigPaths } from "./config-reader.js"
 export type { ClineGlobalState, ClineConfigPaths } from "./config-reader.js"
 export { runOnce, runStream } from "./cline-runner.js"
 export { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
+export { runStreamJson } from "./stream-json-runner.js"
+export {
+  resolveCliRunProfile,
+  deriveModelDef,
+  CLAUDE_MODELS,
+  CODEX_MODELS,
+  DEFAULT_COMMAND,
+} from "./cli-profiles.js"
+export type { CliModelDef, CliRunProfile, CliLineParser, ParsedLine } from "./cli-profiles.js"
 
 import { createCline } from "./provider.js"
 export default createCline

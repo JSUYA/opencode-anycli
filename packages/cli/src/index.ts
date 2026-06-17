@@ -534,8 +534,8 @@ async function main(): Promise<void> {
   // https://models.dev/api.json on startup and refreshes hourly to populate
   // its model catalog with every public provider (openai, anthropic, etc.).
   // We force-disable that here because:
-  //   (a) cline is the ONLY usable provider in this wrapper (single-provider
-  //       policy enforced by `enabled_providers: ["cline"]` in the config),
+  //   (a) the only usable providers in this wrapper are the local CLI-backed
+  //       ones declared in `enabled_providers` (cline / claude / codex),
   //   (b) the model picker should not advertise providers the user cannot
   //       reach, and
   //   (c) it removes one external network call from the wrapper's footprint.

@@ -6,6 +6,19 @@ OpenCode-AnyCLI keeps cline as the model caller, while opencode provides the TUI
 project workflow, agents, commands, and session experience. You do not need to
 copy model keys or recreate cline settings inside opencode.
 
+It also lets you pick the **claude** or **codex** CLI as the model caller, reusing
+the OAuth login those CLIs already hold. In opencode's model picker:
+
+| Provider | Models |
+|---|---|
+| `cline` | `cline/default` |
+| `claude` | `claude/opus-4.8-high`, `claude/opus-4.8-xhigh`, `claude/opus-4.8-max` |
+| `codex` | `codex/gpt-5.5-high`, `codex/gpt-5.5-xhigh` |
+
+The effort tier (`high` / `xhigh` / `max`) is part of the model id, and each CLI
+runs with its permission prompts auto-bypassed to match cline's `--yolo`. See
+[Provider modes](./docs/provider-modes.md) for details.
+
 ## When to use it
 
 Use OpenCode-AnyCLI when you want cline-backed coding work to run inside an

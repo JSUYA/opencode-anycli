@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "enabled_providers": ["cline"],
+  "enabled_providers": ["cline", "claude", "codex"],
   "lsp": true,
   "provider": {
     "cline": {
@@ -13,7 +13,48 @@
         }
       },
       "options": {
+        "cli": "cline",
         "mode": "subprocess"
+      }
+    },
+    "claude": {
+      "npm": "file://__OPENCODE_ANYCLI_PROVIDER_DIST__",
+      "name": "Claude (claude CLI)",
+      "models": {
+        "opus-4.8-high": {
+          "name": "Claude Opus 4.8 · high effort",
+          "limit": { "context": 1000000, "output": 64000 }
+        },
+        "opus-4.8-xhigh": {
+          "name": "Claude Opus 4.8 · xhigh effort",
+          "limit": { "context": 1000000, "output": 64000 }
+        },
+        "opus-4.8-max": {
+          "name": "Claude Opus 4.8 · max effort",
+          "limit": { "context": 1000000, "output": 64000 }
+        }
+      },
+      "options": {
+        "cli": "claude",
+        "command": "claude"
+      }
+    },
+    "codex": {
+      "npm": "file://__OPENCODE_ANYCLI_PROVIDER_DIST__",
+      "name": "Codex (codex CLI)",
+      "models": {
+        "gpt-5.5-high": {
+          "name": "Codex GPT-5.5 · high effort",
+          "limit": { "context": 400000, "output": 128000 }
+        },
+        "gpt-5.5-xhigh": {
+          "name": "Codex GPT-5.5 · xhigh effort",
+          "limit": { "context": 400000, "output": 128000 }
+        }
+      },
+      "options": {
+        "cli": "codex",
+        "command": "codex"
       }
     }
   },

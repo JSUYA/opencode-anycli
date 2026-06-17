@@ -20,6 +20,8 @@ import type {
 } from "@ai-sdk/provider"
 import { runOnce, runStream } from "./cline-runner.js"
 import { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
+import { runStreamJson } from "./stream-json-runner.js"
+import { DEFAULT_COMMAND, resolveCliRunProfile } from "./cli-profiles.js"
 import { composeClineHandoff, type ClineHandoffDiagnostics } from "./cline-handoff.js"
 import {
   OpencodeCallParser,
@@ -30,7 +32,7 @@ import {
   type OpencodeCall,
   type ProtocolToolDescriptor,
 } from "./opencode-call-parser.js"
-import type { ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
+import type { CliFlavor, ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
 
 const DEFAULT_TIMEOUT_MS = 3_600_000
 
@@ -117,6 +119,7 @@ export class ClineLanguageModel implements LanguageModelV3 {
   readonly supportedUrls: Record<string, RegExp[]> = {}
 
   private readonly options: {
+    cli: CliFlavor
     mode: ClineMode
     command: string
     timeoutMs: number
@@ -138,10 +141,15 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
 
   constructor(modelId: string, options: ClineProviderOptions = {}) {
     this.modelId = modelId
-    const envOverrideBin = process.env["OPENCODE_ANYCLI_CLINE_BIN"]
+    const cli: CliFlavor = options.cli ?? "cline"
+    // OPENCODE_ANYCLI_CLINE_BIN only overrides the cline binary; claude/codex
+    // default to their own binary name (overridable via options.command).
+    const envOverrideBin = cli === "cline" ? process.env["OPENCODE_ANYCLI_CLINE_BIN"] : undefined
+    const defaultCommand = cli === "cline" ? "cline" : DEFAULT_COMMAND[cli]
     this.options = {
+      cli,
       mode: options.mode ?? "subprocess",
-      command: envOverrideBin ?? options.command ?? "cline",
+      command: envOverrideBin ?? options.command ?? defaultCommand,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       extraArgs: options.extraArgs,
       cwd: options.cwd,
@@ -150,6 +158,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
   }
 
   async doGenerate(options: LanguageModelV3CallOptions): Promise<Awaited<ReturnType<LanguageModelV3["doGenerate"]>>> {
+    if (this.options.cli !== "cline") return this.doGenerateCli(options)
     if (this.options.mode === "passthrough") {
       // TODO: implement passthrough mode — read ~/.cline/data/globalState.json
       // and ~/.cline/data/secrets.json, then construct an @ai-sdk/openai-compatible
@@ -284,6 +293,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
   }
 
   async doStream(options: LanguageModelV3CallOptions): Promise<Awaited<ReturnType<LanguageModelV3["doStream"]>>> {
+    if (this.options.cli !== "cline") return this.doStreamCli(options)
     if (this.options.mode === "passthrough") {
       throw new Error("Passthrough mode not yet implemented — see docs/provider-modes.md")
     }
@@ -600,6 +610,214 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
       response: { headers: {} },
     }
   }
+
+  // ─── claude / codex flavors ────────────────────────────────────────────────
+  // These CLIs have no native ACP transport, so we drive them as subprocess
+  // stream-json runs (see cli-profiles.ts + stream-json-runner.ts). They run
+  // their own internal tool loop, so we only forward assistant text + usage —
+  // no opencode-call protocol, no tool bridging.
+
+  private async doGenerateCli(
+    options: LanguageModelV3CallOptions,
+  ): Promise<Awaited<ReturnType<LanguageModelV3["doGenerate"]>>> {
+    const flavor = this.options.cli as Exclude<CliFlavor, "cline">
+    const modelId = this.modelId
+
+    const maxTurns = parseInt(process.env["OPENCODE_ANYCLI_MAX_TURNS"] ?? String(DEFAULT_MAX_TURNS), 10)
+    if (countTurnsInPrompt(options.prompt as ReadonlyArray<unknown>) >= maxTurns) {
+      return {
+        content: [{ type: "text", text: maxTurnsMessage(maxTurns) }] as Awaited<
+          ReturnType<LanguageModelV3["doGenerate"]>
+        >["content"],
+        finishReason: { unified: "stop", raw: "max-turns-reached" },
+        usage: toV3Usage(emptyClineUsage()),
+        warnings: [],
+        response: { id: cryptoRandomId(), timestamp: new Date(), modelId },
+        providerMetadata: { [flavor]: { modelLabel: modelId, maxTurnsReached: true } },
+      }
+    }
+
+    const handoff = composeClineHandoff({ prompt: options.prompt as ReadonlyArray<unknown> })
+    const promptText = handoff.text
+    logPromptDebug("generate", options.prompt as ReadonlyArray<unknown>, promptText, handoff.diagnostics)
+
+    const profile = resolveCliRunProfile(flavor, modelId, this.options.command, this.options.extraArgs ?? [])
+    let text = ""
+    let usage: ClineUsage = emptyClineUsage()
+    let parseErrors = 0
+    for await (const ev of runStreamJson(
+      {
+        prompt: promptText,
+        options: {
+          command: this.options.command,
+          timeoutMs: this.options.timeoutMs,
+          extraArgs: this.options.extraArgs,
+          cwd: this.options.cwd,
+          env: this.options.env,
+        },
+        signal: options.abortSignal,
+      },
+      profile,
+    )) {
+      if (ev.type === "text-delta") text += ev.delta
+      else if (ev.type === "finish") {
+        usage = ev.usage
+        parseErrors = ev.parseErrors
+      } else if (ev.type === "error") throw ev.error
+    }
+
+    const content = text.length > 0 ? [{ type: "text" as const, text }] : []
+    return {
+      content: content as Awaited<ReturnType<LanguageModelV3["doGenerate"]>>["content"],
+      finishReason: { unified: "stop", raw: undefined },
+      usage: toV3Usage(usage),
+      warnings: [],
+      response: { id: cryptoRandomId(), timestamp: new Date(), modelId },
+      providerMetadata: { [flavor]: { parseErrors, modelLabel: modelId } },
+    }
+  }
+
+  private async doStreamCli(
+    options: LanguageModelV3CallOptions,
+  ): Promise<Awaited<ReturnType<LanguageModelV3["doStream"]>>> {
+    const flavor = this.options.cli as Exclude<CliFlavor, "cline">
+    const modelId = this.modelId
+
+    const maxTurns = parseInt(process.env["OPENCODE_ANYCLI_MAX_TURNS"] ?? String(DEFAULT_MAX_TURNS), 10)
+    if (countTurnsInPrompt(options.prompt as ReadonlyArray<unknown>) >= maxTurns) {
+      const responseId = cryptoRandomId()
+      const stream = new ReadableStream<LanguageModelV3StreamPart>({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] })
+          controller.enqueue({ type: "response-metadata", id: responseId, timestamp: new Date(), modelId })
+          controller.enqueue({ type: "text-start", id: "text-0" })
+          controller.enqueue({ type: "text-delta", id: "text-0", delta: maxTurnsMessage(maxTurns) })
+          controller.enqueue({ type: "text-end", id: "text-0" })
+          controller.enqueue({
+            type: "finish",
+            finishReason: { unified: "stop", raw: "max-turns-reached" },
+            usage: toV3Usage(emptyClineUsage()),
+            providerMetadata: { [flavor]: { modelLabel: modelId, maxTurnsReached: true } },
+          })
+          controller.close()
+        },
+      })
+      return { stream, response: { headers: {} } }
+    }
+
+    const handoff = composeClineHandoff({ prompt: options.prompt as ReadonlyArray<unknown> })
+    const promptText = handoff.text
+    logPromptDebug("stream", options.prompt as ReadonlyArray<unknown>, promptText, handoff.diagnostics)
+
+    const profile = resolveCliRunProfile(flavor, modelId, this.options.command, this.options.extraArgs ?? [])
+    const runOptions = {
+      command: this.options.command,
+      timeoutMs: this.options.timeoutMs,
+      extraArgs: this.options.extraArgs,
+      cwd: this.options.cwd,
+      env: this.options.env,
+    }
+    const responseId = cryptoRandomId()
+
+    const internalAbort = new AbortController()
+    if (options.abortSignal) {
+      if (options.abortSignal.aborted) internalAbort.abort()
+      else options.abortSignal.addEventListener("abort", () => internalAbort.abort(), { once: true })
+    }
+    let streamCancelled = false
+
+    const stream = new ReadableStream<LanguageModelV3StreamPart>({
+      async start(controller) {
+        const safeEnqueue = (part: LanguageModelV3StreamPart) => {
+          if (streamCancelled) return
+          try {
+            controller.enqueue(part)
+          } catch {
+            streamCancelled = true
+          }
+        }
+        const safeClose = () => {
+          if (streamCancelled) return
+          streamCancelled = true
+          try {
+            controller.close()
+          } catch {
+            /* already closed */
+          }
+        }
+
+        safeEnqueue({ type: "stream-start", warnings: [] })
+        safeEnqueue({ type: "response-metadata", id: responseId, timestamp: new Date(), modelId })
+
+        let activeTextBlockId: string | null = null
+        const openTextBlock = (): string => {
+          if (activeTextBlockId !== null) return activeTextBlockId
+          const id = "text-0"
+          safeEnqueue({ type: "text-start", id })
+          activeTextBlockId = id
+          return id
+        }
+        const closeTextBlock = () => {
+          if (activeTextBlockId === null) return
+          safeEnqueue({ type: "text-end", id: activeTextBlockId })
+          activeTextBlockId = null
+        }
+
+        let usage: ClineUsage = emptyClineUsage()
+        let parseErrors = 0
+        try {
+          for await (const ev of runStreamJson(
+            { prompt: promptText, options: runOptions, signal: internalAbort.signal },
+            profile,
+          )) {
+            if (streamCancelled) break
+            if (ev.type === "text-delta") {
+              const id = openTextBlock()
+              safeEnqueue({ type: "text-delta", id, delta: ev.delta })
+            } else if (ev.type === "finish") {
+              usage = ev.usage
+              parseErrors = ev.parseErrors
+            } else if (ev.type === "error") {
+              throw ev.error
+            }
+          }
+          closeTextBlock()
+          safeEnqueue({
+            type: "finish",
+            finishReason: { unified: "stop", raw: undefined },
+            usage: toV3Usage(usage),
+            providerMetadata: { [flavor]: { parseErrors, modelLabel: modelId } },
+          })
+          safeClose()
+        } catch (err) {
+          closeTextBlock()
+          safeEnqueue({ type: "error", error: err instanceof Error ? err : new Error(String(err)) })
+          safeClose()
+        }
+      },
+      cancel() {
+        streamCancelled = true
+        internalAbort.abort()
+      },
+    })
+
+    return { stream, response: { headers: {} } }
+  }
+}
+
+function emptyClineUsage(): ClineUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 0,
+    totalCost: undefined,
+  }
+}
+
+function maxTurnsMessage(maxTurns: number): string {
+  return `[opencode-anycli] Maximum turns (${maxTurns}) reached. Stopping to prevent infinite loop. Use OPENCODE_ANYCLI_MAX_TURNS env var to increase limit if needed.`
 }
 
 function cryptoRandomId(): string {

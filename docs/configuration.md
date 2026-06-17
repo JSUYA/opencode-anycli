@@ -12,16 +12,37 @@
 
 The CLI sets `XDG_CONFIG_HOME=$HOME/.config/opencode-anycli` when starting opencode. To override that wrapper-private XDG directory, set `OPENCODE_ANYCLI_XDG`.
 
+## Providers and models
+
+The bundled config registers three CLI-backed providers. Pick any of them in
+opencode's model picker as `provider/model`:
+
+| Provider | Model id | Backing CLI | Model · effort |
+| --- | --- | --- | --- |
+| `cline` | `default` | `cline` | auto-detected from cline config |
+| `claude` | `opus-4.8-high` / `opus-4.8-xhigh` / `opus-4.8-max` | `claude` | Opus 4.8 · high/xhigh/max |
+| `codex` | `gpt-5.5-high` / `gpt-5.5-xhigh` | `codex` | GPT-5.5 · high/xhigh |
+
+`claude` and `codex` reuse the OAuth login already stored by those CLIs — no
+keys are copied into opencode. They run as subprocess stream-json sessions
+(`claude -p --output-format stream-json`, `codex exec --json`) because neither
+binary ships a native `--acp` transport. The reasoning effort is taken from the
+model id suffix, and yolo permission bypass is applied automatically per CLI
+(`--permission-mode bypassPermissions` for claude,
+`--dangerously-bypass-approvals-and-sandbox` for codex), matching cline's
+always-on `--yolo`.
+
 ## Provider Options
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `mode` | `subprocess`, `acp`, or `passthrough` | `subprocess` | `passthrough` is not implemented yet. |
-| `command` | string | `cline` | Path to the cline binary. |
-| `extraArgs` | string array | `[]` | Additional cline arguments. |
+| `cli` | `cline`, `claude`, or `codex` | `cline` | Which locally-installed CLI this provider drives. |
+| `mode` | `subprocess`, `acp`, or `passthrough` | `subprocess` | cline only. `passthrough` is not implemented yet. |
+| `command` | string | the `cli` name | Path to the CLI binary. |
+| `extraArgs` | string array | `[]` | Additional CLI arguments (appended after the flavor's own flags). |
 | `cwd` | string | opencode working directory | Optional working directory override. |
 | `timeoutMs` | number | `3600000` | Subprocess timeout. |
-| `env` | object | `{}` | Extra environment variables for cline. |
+| `env` | object | `{}` | Extra environment variables for the CLI. |
 
 ## Environment Variables
 

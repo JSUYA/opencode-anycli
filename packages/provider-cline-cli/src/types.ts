@@ -22,10 +22,26 @@
  */
 export type ClineMode = "subprocess" | "acp" | "passthrough"
 
+/**
+ * Which locally-installed CLI this provider drives.
+ *
+ *  - "cline"  (default) — the cline CLI, via NDJSON subprocess or `--acp`.
+ *  - "claude" — Claude Code CLI, via `claude -p --output-format stream-json`.
+ *  - "codex"  — Codex CLI, via `codex exec --json`.
+ *
+ * claude / codex have no native `--acp` transport, so they always run in
+ * subprocess stream-json mode. The model + reasoning effort come from the
+ * opencode model id (see cli-profiles.ts), and yolo permission bypass is
+ * applied automatically per CLI.
+ */
+export type CliFlavor = "cline" | "claude" | "codex"
+
 export interface ClineProviderOptions {
+  /** See {@link CliFlavor}. Default: "cline". */
+  cli?: CliFlavor
   /** See {@link ClineMode}. Default: "subprocess". */
   mode?: ClineMode
-  /** Path to the cline binary. Defaults to "cline" (resolved via PATH). */
+  /** Path to the CLI binary. Defaults to the flavor name (`cline`/`claude`/`codex`), resolved via PATH. */
   command?: string
   /** Extra args appended after `--json --yolo --act`. */
   extraArgs?: string[]
