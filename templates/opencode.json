@@ -1,6 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "enabled_providers": ["cline", "claude", "codex"],
+  "enabled_providers": [
+    "cline",
+    "claude",
+    "codex"
+  ],
   "lsp": true,
   "provider": {
     "cline": {
@@ -9,11 +13,17 @@
       "models": {
         "GaussO4.1": {
           "name": "Cline GaussO4.1",
-          "limit": { "context": 256000, "output": 8192 }
+          "limit": {
+            "context": 256000,
+            "output": 8192
+          }
         },
         "GaussO3.3": {
           "name": "Cline GaussO3.3",
-          "limit": { "context": 256000, "output": 8192 }
+          "limit": {
+            "context": 256000,
+            "output": 8192
+          }
         }
       },
       "options": {
@@ -27,15 +37,45 @@
       "models": {
         "opus-4.8-high": {
           "name": "Claude Opus 4.8 · high effort",
-          "limit": { "context": 1000000, "output": 64000 }
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
         },
         "opus-4.8-xhigh": {
           "name": "Claude Opus 4.8 · xhigh effort",
-          "limit": { "context": 1000000, "output": 64000 }
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
         },
         "opus-4.8-max": {
           "name": "Claude Opus 4.8 · max effort",
-          "limit": { "context": 1000000, "output": 64000 }
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
+        },
+        "sonnet-high": {
+          "name": "Claude Sonnet · high effort",
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
+        },
+        "sonnet-xhigh": {
+          "name": "Claude Sonnet · xhigh effort",
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
+        },
+        "sonnet-max": {
+          "name": "Claude Sonnet · max effort",
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
         }
       },
       "options": {
@@ -47,13 +87,33 @@
       "npm": "file://__OPENCODE_ANYCLI_PROVIDER_DIST__",
       "name": "Codex (codex CLI)",
       "models": {
+        "gpt-5.4-high": {
+          "name": "Codex GPT-5.4 · high effort",
+          "limit": {
+            "context": 256000,
+            "output": 8192
+          }
+        },
+        "gpt-5.4-xhigh": {
+          "name": "Codex GPT-5.4 · xhigh effort",
+          "limit": {
+            "context": 256000,
+            "output": 8192
+          }
+        },
         "gpt-5.5-high": {
           "name": "Codex GPT-5.5 · high effort",
-          "limit": { "context": 400000, "output": 128000 }
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-xhigh": {
           "name": "Codex GPT-5.5 · xhigh effort",
-          "limit": { "context": 400000, "output": 128000 }
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         }
       },
       "options": {
@@ -66,12 +126,26 @@
   "small_model": "cline/GaussO4.1",
   "default_agent": "orchestrator",
   "agent": {
-    "build":      { "model": "cline/GaussO4.1" },
-    "plan":       { "model": "cline/GaussO4.1" },
-    "compaction": { "model": "cline/GaussO4.1" },
-    "summary":    { "model": "cline/GaussO4.1" },
-    "title":      { "model": "cline/GaussO4.1" },
-    "explore":    { "model": "cline/GaussO4.1" },
-    "general":    { "model": "cline/GaussO4.1" }
+    "build": {
+      "model": "cline/GaussO4.1"
+    },
+    "plan": {
+      "model": "cline/GaussO4.1"
+    },
+    "compaction": {
+      "model": "cline/GaussO4.1"
+    },
+    "summary": {
+      "model": "cline/GaussO4.1"
+    },
+    "title": {
+      "model": "cline/GaussO4.1"
+    },
+    "explore": {
+      "model": "cline/GaussO4.1"
+    },
+    "general": {
+      "model": "cline/GaussO4.1"
+    }
   }
 }

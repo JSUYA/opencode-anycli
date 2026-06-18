@@ -35,9 +35,14 @@ export const CLAUDE_MODELS: Record<string, CliModelDef> = {
   "opus-4.8-high": { model: "opus", effort: "high" },
   "opus-4.8-xhigh": { model: "opus", effort: "xhigh" },
   "opus-4.8-max": { model: "opus", effort: "max" },
+  "sonnet-high": { model: "sonnet", effort: "high" },
+  "sonnet-xhigh": { model: "sonnet", effort: "xhigh" },
+  "sonnet-max": { model: "sonnet", effort: "max" },
 }
 
 export const CODEX_MODELS: Record<string, CliModelDef> = {
+  "gpt-5.4-high": { model: "gpt-5.4", effort: "high" },
+  "gpt-5.4-xhigh": { model: "gpt-5.4", effort: "xhigh" },
   "gpt-5.5-high": { model: "gpt-5.5", effort: "high" },
   "gpt-5.5-xhigh": { model: "gpt-5.5", effort: "xhigh" },
 }
@@ -84,6 +89,17 @@ export interface ParsedLine {
 
 export type CliLineParser = (obj: unknown) => ParsedLine
 
+interface ActiveClaudeTool {
+  name: string
+  parentToolUseId?: string | undefined
+  partialJson: string
+}
+
+interface ClaudeParserState {
+  activeTools: Map<number, ActiveClaudeTool>
+  sawTextDelta: boolean
+}
+
 export interface CliRunProfile {
   command: string
   /** argv WITHOUT the prompt — the prompt is written to stdin. */
@@ -124,7 +140,7 @@ export function resolveCliRunProfile(
         "bypassPermissions",
         ...extraArgs,
       ],
-      parseLine: parseClaudeLine,
+      parseLine: createClaudeLineParser(),
     }
   }
   // codex
@@ -158,7 +174,12 @@ export function resolveCliRunProfile(
 //                cache_creation_input_tokens},
 //       "modelUsage":{"<model>":{"contextWindow":1000000,...}}}
 
-function parseClaudeLine(obj: unknown): ParsedLine {
+function createClaudeLineParser(): CliLineParser {
+  const state: ClaudeParserState = { activeTools: new Map(), sawTextDelta: false }
+  return (obj) => parseClaudeLine(obj, state)
+}
+
+function parseClaudeLine(obj: unknown, state?: ClaudeParserState): ParsedLine {
   const o = asRecord(obj)
   if (!o) return { events: [] }
   const type = o["type"]
@@ -167,12 +188,22 @@ function parseClaudeLine(obj: unknown): ParsedLine {
     const ev = asRecord(o["event"])
     if (!ev) return { events: [] }
     const evType = ev["type"]
+    if (evType === "content_block_start") {
+      return { events: claudeToolStartEvents(o, ev, state) }
+    }
     if (evType === "content_block_delta") {
       const delta = asRecord(ev["delta"])
       if (delta && delta["type"] === "text_delta" && typeof delta["text"] === "string") {
+        if (state) state.sawTextDelta = true
         return { events: [{ type: "text-delta", delta: delta["text"] as string }] }
       }
+      if (delta && delta["type"] === "input_json_delta" && typeof delta["partial_json"] === "string") {
+        claudeToolInputDelta(ev, delta["partial_json"] as string, state)
+      }
       return { events: [] }
+    }
+    if (evType === "content_block_stop") {
+      return { events: claudeToolStopEvents(ev, state) }
     }
     if (evType === "message_start") {
       const message = asRecord(ev["message"])
@@ -186,6 +217,10 @@ function parseClaudeLine(obj: unknown): ParsedLine {
     return { events: [] }
   }
 
+  if (type === "assistant") {
+    return { events: claudeAssistantMessageEvents(o, state) }
+  }
+
   if (type === "result") {
     const usage = claudeUsage(asRecord(o["usage"]))
     if (usage && typeof o["total_cost_usd"] === "number") usage.totalCost = o["total_cost_usd"] as number
@@ -195,6 +230,109 @@ function parseClaudeLine(obj: unknown): ParsedLine {
   }
 
   return { events: [] }
+}
+
+function claudeToolStartEvents(
+  line: Record<string, unknown>,
+  ev: Record<string, unknown>,
+  state: ClaudeParserState | undefined,
+): StreamEvent[] {
+  const block = asRecord(ev["content_block"])
+  if (!block || block["type"] !== "tool_use") return []
+
+  const name = typeof block["name"] === "string" ? block["name"] : "tool"
+  const index = typeof ev["index"] === "number" ? (ev["index"] as number) : -1
+  const parentToolUseId =
+    typeof line["parent_tool_use_id"] === "string" ? (line["parent_tool_use_id"] as string) : undefined
+
+  state?.activeTools.set(index, { name, parentToolUseId, partialJson: "" })
+  return [{ type: "text-delta", delta: `\n${claudeToolStatusPrefix(name, parentToolUseId)}...\n` }]
+}
+
+function claudeToolInputDelta(
+  ev: Record<string, unknown>,
+  partialJson: string,
+  state: ClaudeParserState | undefined,
+): void {
+  if (!state) return
+  const index = typeof ev["index"] === "number" ? (ev["index"] as number) : -1
+  const active = state.activeTools.get(index)
+  if (active) active.partialJson += partialJson
+}
+
+function claudeToolStopEvents(ev: Record<string, unknown>, state: ClaudeParserState | undefined): StreamEvent[] {
+  if (!state) return []
+  const index = typeof ev["index"] === "number" ? (ev["index"] as number) : -1
+  const active = state.activeTools.get(index)
+  if (!active) return []
+
+  state.activeTools.delete(index)
+  const detail = claudeToolDetail(active)
+  return [{ type: "text-delta", delta: `${claudeToolStatusPrefix(active.name, active.parentToolUseId)}${detail} done\n` }]
+}
+
+function claudeAssistantMessageEvents(
+  o: Record<string, unknown>,
+  state: ClaudeParserState | undefined,
+): StreamEvent[] {
+  if (state?.sawTextDelta) return []
+
+  const message = asRecord(o["message"]) ?? o
+  const content = Array.isArray(message["content"]) ? message["content"] : []
+  const events: StreamEvent[] = []
+  let emittedTextFallback = false
+
+  for (const item of content) {
+    const block = asRecord(item)
+    if (!block) continue
+    if (block["type"] === "text" && typeof block["text"] === "string" && block["text"]) {
+      events.push({ type: "text-delta", delta: block["text"] as string })
+      emittedTextFallback = true
+    } else if (block["type"] === "tool_use") {
+      const name = typeof block["name"] === "string" ? (block["name"] as string) : "tool"
+      events.push({ type: "text-delta", delta: `\n${claudeToolStatusPrefix(name, undefined)}...\n` })
+    }
+  }
+
+  if (emittedTextFallback && state) state.sawTextDelta = true
+  return events
+}
+
+function claudeToolStatusPrefix(name: string, parentToolUseId: string | undefined): string {
+  const scope = parentToolUseId ? "claude:subagent" : "claude"
+  if (name === "Task") return `[${scope}] starting subagent`
+  return `[${scope}] using ${name}`
+}
+
+function claudeToolDetail(active: ActiveClaudeTool): string {
+  const input = parseJsonObject(active.partialJson)
+  if (!input) return ""
+
+  const fields =
+    active.name === "Task"
+      ? ["description", "subagent_type"]
+      : ["command", "file_path", "pattern", "url", "query", "path"]
+  for (const field of fields) {
+    const value = input[field]
+    if (typeof value === "string" && value.trim().length > 0) {
+      return ` (${field}: ${truncateStatus(value.trim())})`
+    }
+  }
+  return ""
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  if (!text) return null
+  try {
+    const parsed = JSON.parse(text) as unknown
+    return asRecord(parsed)
+  } catch {
+    return null
+  }
+}
+
+function truncateStatus(text: string): string {
+  return text.length > 120 ? `${text.slice(0, 117)}...` : text
 }
 
 function claudeUsage(u: Record<string, unknown> | null): ClineUsage | undefined {

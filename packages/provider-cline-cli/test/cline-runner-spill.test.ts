@@ -101,7 +101,8 @@ describe("cline-runner prompt spill", () => {
     const match = wrapperArg!.match(/(\S*opencode-anycli-prompts\/prompt-[^\s]+\.txt)/)
     expect(match).not.toBeNull()
     const filePath = match![1]
-    // by the time runOnce resolves the temp file should be cleaned up.
+    // cleanup is scheduled from the child close path; give unlink a tick.
+    await new Promise((r) => setTimeout(r, 20))
     expect(existsSync(filePath)).toBe(false)
   })
 

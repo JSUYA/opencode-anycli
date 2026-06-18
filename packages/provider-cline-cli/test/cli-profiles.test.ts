@@ -27,6 +27,8 @@ describe("deriveModelDef", () => {
 
   it("keeps the registries in sync with the model id keys", () => {
     expect(Object.keys(CLAUDE_MODELS)).toContain("opus-4.8-max")
+    expect(Object.keys(CLAUDE_MODELS)).toContain("sonnet-max")
+    expect(Object.keys(CODEX_MODELS)).toContain("gpt-5.4-xhigh")
     expect(Object.keys(CODEX_MODELS)).toContain("gpt-5.5-xhigh")
   })
 })
@@ -72,6 +74,12 @@ describe("resolveCliRunProfile — claude argv", () => {
     const custom = resolveCliRunProfile("claude", "opus-4.8-high", "/opt/claude/bin/claude")
     expect(custom.command).toBe("/opt/claude/bin/claude")
   })
+
+  it("maps sonnet ids to the claude sonnet model with effort", () => {
+    const sonnet = resolveCliRunProfile("claude", "sonnet-xhigh", "claude")
+    expect(sonnet.args).toContain("sonnet")
+    expect(sonnet.args).toContain("xhigh")
+  })
 })
 
 describe("resolveCliRunProfile — codex argv", () => {
@@ -95,6 +103,12 @@ describe("resolveCliRunProfile — codex argv", () => {
   it("applies yolo approval+sandbox bypass automatically", () => {
     expect(p.args).toContain("--dangerously-bypass-approvals-and-sandbox")
   })
+
+  it("maps gpt-5.4 ids to codex model + reasoning effort", () => {
+    const codex54 = resolveCliRunProfile("codex", "gpt-5.4-xhigh", "codex")
+    expect(codex54.args).toContain("gpt-5.4")
+    expect(codex54.args).toContain("model_reasoning_effort=xhigh")
+  })
 })
 
 describe("claude line parser", () => {
@@ -112,6 +126,71 @@ describe("claude line parser", () => {
     expect(parse({ type: "stream_event", event: { type: "content_block_start" } }).events).toEqual([])
     expect(parse({ type: "system", subtype: "init" }).events).toEqual([])
     expect(parse({ type: "assistant", message: {} }).events).toEqual([])
+  })
+
+  it("emits visible status for streamed tool calls", () => {
+    const fresh = resolveCliRunProfile("claude", "opus-4.8-high", "claude").parseLine
+
+    expect(
+      fresh({
+        type: "stream_event",
+        parent_tool_use_id: "task-1",
+        event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", name: "Bash" } },
+      }).events,
+    ).toEqual([{ type: "text-delta", delta: "\n[claude:subagent] using Bash...\n" }])
+
+    expect(
+      fresh({
+        type: "stream_event",
+        event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"command\":\"npm test\"}" } },
+      }).events,
+    ).toEqual([])
+
+    expect(fresh({ type: "stream_event", event: { type: "content_block_stop", index: 0 } }).events).toEqual([
+      { type: "text-delta", delta: "[claude:subagent] using Bash (command: npm test) done\n" },
+    ])
+  })
+
+  it("shows Task tool calls as subagent progress", () => {
+    const fresh = resolveCliRunProfile("claude", "opus-4.8-high", "claude").parseLine
+
+    expect(
+      fresh({
+        type: "stream_event",
+        event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", name: "Task" } },
+      }).events,
+    ).toEqual([{ type: "text-delta", delta: "\n[claude] starting subagent...\n" }])
+
+    fresh({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{\"description\":\"inspect failures\",\"subagent_type\":\"general-purpose\"}" },
+      },
+    })
+
+    expect(fresh({ type: "stream_event", event: { type: "content_block_stop", index: 0 } }).events).toEqual([
+      { type: "text-delta", delta: "[claude] starting subagent (description: inspect failures) done\n" },
+    ])
+  })
+
+  it("uses complete assistant messages as a fallback when partial deltas are absent", () => {
+    const fresh = resolveCliRunProfile("claude", "opus-4.8-high", "claude").parseLine
+    const out = fresh({ type: "assistant", message: { content: [{ type: "text", text: "done" }] } })
+    expect(out.events).toEqual([{ type: "text-delta", delta: "done" }])
+  })
+
+  it("does not let assistant tool status suppress later assistant text fallback", () => {
+    const fresh = resolveCliRunProfile("claude", "opus-4.8-high", "claude").parseLine
+
+    expect(
+      fresh({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "README.md" } }] } }).events,
+    ).toEqual([{ type: "text-delta", delta: "\n[claude] using Read...\n" }])
+
+    expect(fresh({ type: "assistant", message: { content: [{ type: "text", text: "done" }] } }).events).toEqual([
+      { type: "text-delta", delta: "done" },
+    ])
   })
 
   it("extracts usage + cost + context window from the result event", () => {

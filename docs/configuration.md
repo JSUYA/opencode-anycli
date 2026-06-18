@@ -20,8 +20,8 @@ opencode's model picker as `provider/model`:
 | Provider | Model id | Backing CLI | Model · effort |
 | --- | --- | --- | --- |
 | `cline` | `GaussO4.1` / `GaussO3.3` | `cline` | passed to cline as `-m <model>` |
-| `claude` | `opus-4.8-high` / `opus-4.8-xhigh` / `opus-4.8-max` | `claude` | Opus 4.8 · high/xhigh/max |
-| `codex` | `gpt-5.5-high` / `gpt-5.5-xhigh` | `codex` | GPT-5.5 · high/xhigh |
+| `claude` | `opus-4.8-high` / `opus-4.8-xhigh` / `opus-4.8-max` / `sonnet-high` / `sonnet-xhigh` / `sonnet-max` | `claude` | Opus 4.8 or Sonnet · high/xhigh/max |
+| `codex` | `gpt-5.4-high` / `gpt-5.4-xhigh` / `gpt-5.5-high` / `gpt-5.5-xhigh` | `codex` | GPT-5.4 or GPT-5.5 · high/xhigh |
 
 `claude` and `codex` reuse the OAuth login already stored by those CLIs — no
 keys are copied into opencode. They run as subprocess stream-json sessions
