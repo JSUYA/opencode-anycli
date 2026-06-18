@@ -225,6 +225,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
       options: {
         command: this.options.command,
         timeoutMs: this.options.timeoutMs,
+        model: this.modelId,
         extraArgs: this.options.extraArgs,
         cwd: this.options.cwd,
         env: this.options.env,
@@ -491,7 +492,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
         try {
           for await (const ev of streamFn({
             prompt: promptText,
-            options: { command, timeoutMs, extraArgs, cwd, env },
+            options: { command, timeoutMs, model: modelId, extraArgs, cwd, env },
             signal: internalAbort.signal,
           })) {
             if (streamCancelled) break

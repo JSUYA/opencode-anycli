@@ -7,8 +7,12 @@
       "npm": "file://__OPENCODE_ANYCLI_PROVIDER_DIST__",
       "name": "Cline (cline CLI)",
       "models": {
-        "default": {
-          "name": "Cline default (auto-detect from cline config)",
+        "GaussO4.1": {
+          "name": "Cline GaussO4.1",
+          "limit": { "context": 256000, "output": 8192 }
+        },
+        "GaussO3.3": {
+          "name": "Cline GaussO3.3",
           "limit": { "context": 256000, "output": 8192 }
         }
       },
@@ -58,16 +62,16 @@
       }
     }
   },
-  "model": "cline/default",
-  "small_model": "cline/default",
+  "model": "cline/GaussO4.1",
+  "small_model": "cline/GaussO4.1",
   "default_agent": "orchestrator",
   "agent": {
-    "build":      { "model": "cline/default" },
-    "plan":       { "model": "cline/default" },
-    "compaction": { "model": "cline/default" },
-    "summary":    { "model": "cline/default" },
-    "title":      { "model": "cline/default" },
-    "explore":    { "model": "cline/default" },
-    "general":    { "model": "cline/default" }
+    "build":      { "model": "cline/GaussO4.1" },
+    "plan":       { "model": "cline/GaussO4.1" },
+    "compaction": { "model": "cline/GaussO4.1" },
+    "summary":    { "model": "cline/GaussO4.1" },
+    "title":      { "model": "cline/GaussO4.1" },
+    "explore":    { "model": "cline/GaussO4.1" },
+    "general":    { "model": "cline/GaussO4.1" }
   }
 }

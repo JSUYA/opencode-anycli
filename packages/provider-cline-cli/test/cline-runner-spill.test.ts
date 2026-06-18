@@ -67,6 +67,20 @@ describe("cline-runner prompt spill", () => {
     expect(args.some((a) => a.includes("complete user request"))).toBe(false)
   })
 
+  it("passes the selected cline model with -m", async () => {
+    delete process.env[ENV_KEY]
+    const cap = capturingSpawn([COMPLETION])
+    await runOnce({
+      prompt: "small prompt",
+      options: { command: "cline", timeoutMs: 5000, model: "GaussO4.1" },
+      spawnFn: cap.fn,
+    })
+
+    expect(cap.captured.args).not.toBeNull()
+    const args = Array.from(cap.captured.args!)
+    expect(args).toEqual(["--json", "--yolo", "-m", "GaussO4.1", "--act", "small prompt"])
+  })
+
   it("spills oversize prompt to a temp file and substitutes a wrapper in argv", async () => {
     process.env[ENV_KEY] = "32" // tiny limit so we trigger spill on a short string
     const big = "this prompt is intentionally larger than thirty two bytes so we spill"

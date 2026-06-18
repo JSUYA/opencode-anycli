@@ -104,7 +104,42 @@ oc_json_merge() {
   printf '%s' "$template_content" > "$tmpl_file"
   local rc=0
   if command -v jq >/dev/null 2>&1; then
-    jq -s '.[0] * .[1]' "$tmpl_file" "$existing" || rc=$?
+    jq -s '
+      def merge_enabled_providers($tmpl; $existing):
+        if (($tmpl.enabled_providers // null) | type) == "array" then
+          ($tmpl.enabled_providers
+            + (($existing.enabled_providers // [])
+              | map(select(. as $p | ($tmpl.enabled_providers | index($p) | not)))))
+        else
+          null
+        end;
+      def migrate_legacy_cline_default($tmpl):
+        (if has("model") and .model == "cline/default" then .model = "cline/GaussO4.1" else . end)
+        | (if has("small_model") and .small_model == "cline/default" then .small_model = "cline/GaussO4.1" else . end)
+        | (if (.agent? | type) == "object" then
+            .agent |= with_entries(
+              if (.value | type) == "object" and .value.model == "cline/default" then
+                .value.model = "cline/GaussO4.1"
+              else
+                .
+              end
+            )
+          else
+            .
+          end)
+        | (if (($tmpl.provider.cline.models.default // null) == null)
+              and (.provider.cline.models.default.name? == "Cline default (auto-detect from cline config)") then
+            del(.provider.cline.models.default)
+          else
+            .
+          end);
+      .[0] as $T
+      | .[1] as $E
+      | ($T * $E)
+      | (merge_enabled_providers($T; $E) as $enabled
+          | if $enabled != null then .enabled_providers = $enabled else . end)
+      | migrate_legacy_cline_default($T)
+    ' "$tmpl_file" "$existing" || rc=$?
   else
     node -e '
       const fs=require("fs");
@@ -119,7 +154,29 @@ oc_json_merge() {
         }
         return b;
       }
-      process.stdout.write(JSON.stringify(m(T,E),null,2)+"\n");
+      function mergeEnabledProviders(out,t,e){
+        if(!Array.isArray(t.enabled_providers)) return out;
+        const seen=new Set();
+        const values=[...t.enabled_providers,...(Array.isArray(e.enabled_providers)?e.enabled_providers:[])];
+        out.enabled_providers=values.filter((v)=>!seen.has(v)&&seen.add(v));
+        return out;
+      }
+      function migrateLegacyClineDefault(out,t){
+        const legacy="cline/default";
+        const next="cline/GaussO4.1";
+        if(out.model===legacy) out.model=next;
+        if(out.small_model===legacy) out.small_model=next;
+        if(out.agent&&typeof out.agent==="object"&&!Array.isArray(out.agent)){
+          for(const value of Object.values(out.agent)){
+            if(value&&typeof value==="object"&&!Array.isArray(value)&&value.model===legacy) value.model=next;
+          }
+        }
+        const models=out.provider?.cline?.models;
+        const templateDefault=t.provider?.cline?.models?.default;
+        if(templateDefault===undefined&&models?.default?.name==="Cline default (auto-detect from cline config)") delete models.default;
+        return out;
+      }
+      process.stdout.write(JSON.stringify(migrateLegacyClineDefault(mergeEnabledProviders(m(T,E),T,E),T),null,2)+"\n");
     ' "$existing" "$tmpl_file" || rc=$?
   fi
   rm -f "$tmpl_file"

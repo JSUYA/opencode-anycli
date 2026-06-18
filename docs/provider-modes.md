@@ -9,7 +9,7 @@ section).
 
 ## Subprocess
 
-Subprocess mode starts cline for every model request with `cline --json --yolo --act <prompt>`. It is slower, but it preserves cline's own tools and model configuration.
+Subprocess mode starts cline for every model request with `cline --json --yolo -m <model> --act <prompt>`. It is slower, but it preserves cline's own tools and model configuration.
 
 Large prompts are handled automatically: when the flattened prompt exceeds the safe argv threshold, the provider writes it to a `0600` temp file and sends cline a small wrapper prompt instructing it to read that file. This avoids Linux `E2BIG` failures from the kernel's per-argument limit while keeping the default transport compatible with existing cline versions.
 

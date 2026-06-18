@@ -103,6 +103,7 @@ export interface RunInput {
   options: {
     command: string
     timeoutMs: number
+    model?: string | undefined
     extraArgs?: readonly string[] | undefined
     cwd?: string | undefined
     env?: Record<string, string> | undefined
@@ -151,8 +152,9 @@ type VisibleText = {
 }
 
 /** Build the CLI arg list for cline. */
-function buildClineArgs(prompt: string, extraArgs: readonly string[] = []): string[] {
-  return ["--json", "--yolo", "--act", prompt, ...extraArgs]
+function buildClineArgs(prompt: string, model?: string, extraArgs: readonly string[] = []): string[] {
+  const modelArgs = model && model !== "default" ? ["-m", model] : []
+  return ["--json", "--yolo", ...modelArgs, "--act", prompt, ...extraArgs]
 }
 
 /** Buffered runner — collects all text and returns once cline exits or completes. */
@@ -282,7 +284,7 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
       return
     }
   }
-  const args = buildClineArgs(effectivePrompt, options.extraArgs)
+  const args = buildClineArgs(effectivePrompt, options.model, options.extraArgs)
 
   const env = {
     ...process.env,
