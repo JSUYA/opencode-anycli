@@ -605,6 +605,33 @@ if [ ! -f "$AGENTS_TARGET" ]; then
   ok "AGENTS.md installed: $AGENTS_TARGET"
 fi
 
+# Patch oh-my-anycli agent frontmatter: replace `model: cline/default` with
+# the configured default model. oh-my-anycli ships orchestrator.md and other
+# agents with `model: cline/default` which no longer exists as a named model;
+# this step migrates them to whatever `model` is set in the merged opencode.json.
+OMAC_AGENTS_DIR="$HOME/.oh-my-anycli/agents"
+if [ -d "$OMAC_AGENTS_DIR" ]; then
+  step "Patching oh-my-anycli agents (cline/default → configured model)"
+  # Read the configured default model from the merged opencode.json.
+  OMAC_DEFAULT_MODEL="$(node -e "
+    try {
+      const c = JSON.parse(require('fs').readFileSync('$TARGET', 'utf8'));
+      console.log(c.model || 'cline/GaussO4.1');
+    } catch(e) { console.log('cline/GaussO4.1'); }
+  " 2>/dev/null || echo "cline/GaussO4.1")"
+  _omac_patched=0
+  while IFS= read -r -d '' md_file; do
+    if grep -qE '^model:[[:space:]]+cline/default' "$md_file" 2>/dev/null; then
+      sed -i -E "s|^(model:[[:space:]]+)cline/default|\1$OMAC_DEFAULT_MODEL|" "$md_file"
+      ok "Patched model in: $(basename "$md_file")"
+      _omac_patched=$((_omac_patched + 1))
+    fi
+  done < <(find "$OMAC_AGENTS_DIR" -name "*.md" -print0 2>/dev/null)
+  if [ "$_omac_patched" -eq 0 ]; then
+    info "oh-my-anycli agents already up-to-date (no cline/default found)"
+  fi
+fi
+
 # tui.json — opencode reads this for keybind / plugin overrides. We ship one
 # that (1) removes ctrl+c from the `app_exit` keybind so the component-level
 # exit-on-Ctrl+C handlers stop firing, and (2) registers our exit-confirm

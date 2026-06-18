@@ -146,6 +146,9 @@
     },
     "general": {
       "model": "cline/GaussO4.1"
+    },
+    "orchestrator": {
+      "model": "cline/GaussO4.1"
     }
   }
 }
