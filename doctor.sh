@@ -116,9 +116,34 @@ fi
 
 # ─── cline ────────────────────────────────────────────────────────────────────
 section "cline"
+CLINE_MIN_VER="0.5.1"
 CLINE_OK=0
 if check_bin_version cline "cline" "npm install -g cline"; then
-  CLINE_OK=1
+  cline_ver="$(cline --version 2>&1 | head -n1 | sed -E 's/^v//; s/[[:space:]]+$//')"
+  # Pure-bash semver compare — same logic as install.sh's opencode check.
+  _cline_meets_min=0
+  (
+    IFS=.
+    # shellcheck disable=SC2206
+    h=($cline_ver) n=($CLINE_MIN_VER)
+    for i in 0 1 2; do
+      hp="${h[$i]:-0}"; np="${n[$i]:-0}"
+      hp="${hp%%[!0-9]*}"; np="${np%%[!0-9]*}"
+      hp="${hp:-0}"; np="${np:-0}"
+      [ "$hp" -gt "$np" ] && exit 0
+      [ "$hp" -lt "$np" ] && exit 1
+    done
+    exit 0
+  ) && _cline_meets_min=1
+  if [ "$_cline_meets_min" -eq 1 ]; then
+    ok "cline $cline_ver ≥ $CLINE_MIN_VER (minimum required)"
+    CLINE_OK=1
+  else
+    nope "cline $cline_ver < $CLINE_MIN_VER — versions below $CLINE_MIN_VER may not work correctly"
+    note "Upgrade: npm install -g cline@latest"
+    note "  (manual recovery if ENOTEMPTY:)"
+    note "  rm -rf \"\$(npm prefix -g)/lib/node_modules/cline\" && npm install -g cline@latest"
+  fi
 fi
 
 # ─── cline config ─────────────────────────────────────────────────────────────

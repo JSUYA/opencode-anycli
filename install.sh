@@ -397,15 +397,59 @@ else
 fi
 
 # ─── 4. cline binary (bundled runtime — auto-installed on demand) ────────────
+# cline 0.5.1 is the first release that works correctly with opencode-anycli.
+# Earlier versions miss critical API surface (JSON output flags, --yolo mode
+# stability) that the provider-cline-cli bridge depends on at runtime.
+CLINE_MIN_VER="0.5.1"
+cline_version_meets_min() {
+  # Returns 0 (true) if "$1" >= CLINE_MIN_VER under SemVer, 1 otherwise.
+  local have="$1" need="$CLINE_MIN_VER"
+  local IFS=.
+  # shellcheck disable=SC2206
+  local h=($have) n=($need)
+  for i in 0 1 2; do
+    local hp="${h[$i]:-0}" np="${n[$i]:-0}"
+    hp="${hp%%[!0-9]*}"; np="${np%%[!0-9]*}"
+    hp="${hp:-0}"; np="${np:-0}"
+    if [ "$hp" -gt "$np" ]; then return 0; fi
+    if [ "$hp" -lt "$np" ]; then return 1; fi
+  done
+  return 0
+}
+
+install_or_upgrade_cline() {
+  if [ "$NO_AUTO_DEPS" -eq 1 ]; then
+    err "cline ≥ $CLINE_MIN_VER required and --no-auto-deps was specified."
+    err "  Upgrade manually: npm install -g cline@latest"
+    return 1
+  fi
+  auto_npm_install cline cline "cline"
+}
+
 if command -v cline >/dev/null 2>&1; then
-  ok "cline: $(cline --version 2>&1 | head -n1)"
+  current_cline_ver="$(cline --version 2>&1 | head -n1 | sed -E 's/^v//; s/[[:space:]]+$//')"
+  if cline_version_meets_min "$current_cline_ver"; then
+    ok "cline: $current_cline_ver (≥ $CLINE_MIN_VER)"
+  else
+    warn "cline $current_cline_ver is older than the required $CLINE_MIN_VER."
+    warn "  Versions before $CLINE_MIN_VER lack the JSON output and --yolo flags"
+    warn "  that opencode-anycli's provider bridge relies on. Upgrading…"
+    install_or_upgrade_cline || exit 1
+    new_cline_ver="$(cline --version 2>&1 | head -n1 | sed -E 's/^v//; s/[[:space:]]+$//')"
+    if ! cline_version_meets_min "$new_cline_ver"; then
+      err "cline is still $new_cline_ver after upgrade attempt (need ≥ $CLINE_MIN_VER)."
+      err "  Try: npm install -g cline@latest"
+      exit 1
+    fi
+    ok "cline: $new_cline_ver"
+  fi
 elif [ "$NO_AUTO_DEPS" -eq 1 ]; then
   err "cline not found on PATH and --no-auto-deps was specified."
   err "  Install manually: npm install -g cline"
   exit 1
 else
   step "cline is part of opencode-anycli's runtime; installing it now"
-  auto_npm_install cline cline "cline" || exit 1
+  install_or_upgrade_cline || exit 1
 fi
 
 if [ ! -f "$HOME/.cline/data/globalState.json" ]; then
@@ -735,17 +779,57 @@ if [ -n "$RESOLVED_CLI" ]; then
   fi
 fi
 
-# Surface a warning if npm's global bin dir isn't on PATH at all. With
-# nvm this is always set up. With a hand-rolled custom prefix the user
-# may need to add it themselves.
+# Ensure npm's global bin dir is on PATH. With nvm this is normally set up
+# already; with a custom prefix it may be missing. If absent, auto-append a
+# managed block to the active shell's rc file so the user doesn't have to.
+PATH_MARKER_BEGIN="# >>> opencode-anycli PATH (managed by install.sh) >>>"
+PATH_MARKER_END="# <<< opencode-anycli PATH (managed by install.sh) <<<"
+PATH_EXPORT_LINE="export PATH=\"$NPM_GLOBAL_BIN:\$PATH\""
+
+_add_path_to_rc() {
+  local rc="$1"
+  # Already managed by us → skip (idempotent)
+  if grep -qF "$PATH_MARKER_BEGIN" "$rc" 2>/dev/null; then
+    return
+  fi
+  printf '\n%s\n%s\n%s\n' \
+    "$PATH_MARKER_BEGIN" \
+    "$PATH_EXPORT_LINE" \
+    "$PATH_MARKER_END" >> "$rc"
+  ok "Added PATH entry to $rc"
+  note "  Run: source $rc   (or open a new shell)"
+}
+
 case ":$PATH:" in
   *":$NPM_GLOBAL_BIN:"*)
-    : ;;
+    : ;;  # already on PATH — nothing to do
   *)
-    warn "$NPM_GLOBAL_BIN is not on your PATH."
-    note "Add it to your shell init manually so opencode-anycli is found:"
-    note "  export PATH=\"$NPM_GLOBAL_BIN:\$PATH\""
-    note "Then open a new shell or 'source' your rc file."
+    warn "$NPM_GLOBAL_BIN is not on your PATH. Auto-adding to shell rc file(s)."
+    # Determine target rc file(s): prefer the shell currently running install.sh,
+    # then fall back to any rc files that exist.
+    _patched=0
+    _shell_rc=""
+    case "${SHELL:-}" in
+      */zsh)  _shell_rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+      */bash) _shell_rc="$HOME/.bashrc" ;;
+      */fish) _shell_rc="$HOME/.config/fish/config.fish" ;;
+    esac
+    if [ -n "$_shell_rc" ]; then
+      touch "$_shell_rc"
+      _add_path_to_rc "$_shell_rc"
+      _patched=1
+    fi
+    # Also patch other rc files that exist (handles multi-shell setups)
+    for _rc in "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.config/fish/config.fish"; do
+      [ "$_rc" = "$_shell_rc" ] && continue
+      [ -f "$_rc" ] || continue
+      _add_path_to_rc "$_rc"
+      _patched=1
+    done
+    if [ "$_patched" -eq 0 ]; then
+      warn "Could not detect a shell rc file. Add manually:"
+      note "  $PATH_EXPORT_LINE"
+    fi
     ;;
 esac
 
