@@ -219,12 +219,16 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
     )
     if (nlSkill !== null) return nlSkill
 
+    // ACP 모드에서는 stdio JSON-RPC 를 통해 대용량 프롬프트 직접 처리
+    // subprocess 모드에서는 파일 우회 로직 사용
+    // ACP 는 타임아웃 없음 (timeoutMs: 0) — 대형 프롬프트 처리용
     const runner = this.options.mode === "acp" ? runOnceAcp : runOnce
     const result = await runner({
       prompt: promptText,
+      usePromptFile: this.options.mode !== "acp", // ACP 는 파일 우회 불필요
       options: {
         command: this.options.command,
-        timeoutMs: this.options.timeoutMs,
+        timeoutMs: this.options.mode === "acp" ? 0 : this.options.timeoutMs, // ACP 는 타임아웃 없음
         model: this.modelId,
         extraArgs: this.options.extraArgs,
         cwd: this.options.cwd,
@@ -374,7 +378,8 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
     // summary / compaction calls that arrive without tools.
     const parserActive = registeredToolNames.size > 0
     const command = this.options.command
-    const timeoutMs = this.options.timeoutMs
+    // ACP 는 타임아웃 없음 (timeoutMs: 0) — 대형 프롬프트 처리용
+    const timeoutMs = this.options.mode === "acp" ? 0 : this.options.timeoutMs
     const extraArgs = this.options.extraArgs
     const cwd = this.options.cwd
     const env = this.options.env

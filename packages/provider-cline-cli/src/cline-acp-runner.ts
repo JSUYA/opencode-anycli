@@ -70,17 +70,8 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
 
   // Track exit cause so we can surface a real error in `close` instead of
   // silently emitting a finish event.
-  let killReason: "timeout" | "abort" | "client-error" | null = null
-
-  const timeoutHandle = setTimeout(() => {
-    killReason = "timeout"
-    if (DEBUG) process.stderr.write(`[cline-acp] timeout after ${options.timeoutMs}ms — killing pid ${child.pid}\n`)
-    child.kill("SIGTERM")
-    setTimeout(() => {
-      if (!child.killed) child.kill("SIGKILL")
-    }, 2000).unref()
-  }, options.timeoutMs)
-  timeoutHandle.unref()
+  // Timeout disabled — ACP mode runs without time limit for large prompt support.
+  let killReason: "abort" | "client-error" | null = null
 
   const onAbort = () => {
     killReason = "abort"
@@ -201,11 +192,8 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
     finish()
   })
   child.on("close", (code, sigterm) => {
-    clearTimeout(timeoutHandle)
     signal?.removeEventListener("abort", onAbort)
-    if (killReason === "timeout") {
-      exitErr = new Error(`cline ACP timed out after ${options.timeoutMs}ms (signal ${sigterm ?? "SIGTERM"})`)
-    } else if (killReason === "abort") {
+    if (killReason === "abort") {
       exitErr = new Error(`cline ACP aborted by caller (signal ${sigterm ?? "SIGTERM"})`)
     } else if (exitErr === null && code !== 0 && code !== null) {
       exitErr = new Error(`cline --acp exited with code ${code}${sigterm ? ` (signal ${sigterm})` : ""}`)

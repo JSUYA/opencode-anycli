@@ -100,6 +100,12 @@ const VISIBLE_ASK_TEXT_KINDS = new Set([
 
 export interface RunInput {
   prompt: string
+  /**
+   * When true (default: true), large prompts are spilled to a temp file
+   * to avoid E2BIG errors from the kernel's per-argv-byte limit.
+   * ACP mode sets this to false since it routes prompts through stdio JSON-RPC.
+   */
+  usePromptFile?: boolean
   options: {
     command: string
     timeoutMs: number
@@ -269,9 +275,13 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // a temp file; cline receives a small wrapper asking it to read the file.
   // Works on every cline version because we still go through the standard
   // --act path. See prompt-tempfile.ts for the rationale.
+  //
+  // ACP mode sets usePromptFile: false to skip this logic since it routes
+  // prompts through stdio JSON-RPC instead of argv.
+  const usePromptFile = input.usePromptFile ?? true
   let tempPromptFile: string | null = null
   let effectivePrompt = prompt
-  if (shouldUsePromptFile(prompt)) {
+  if (usePromptFile && shouldUsePromptFile(prompt)) {
     try {
       tempPromptFile = await writePromptTempFile(prompt)
       effectivePrompt = buildPromptFileWrapper(tempPromptFile)
