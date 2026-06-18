@@ -543,7 +543,11 @@ else
   if command -v bun >/dev/null 2>&1; then
     info "bun found; using bun install + build"
     bun install
-    bun run build
+    # The root "build" script uses npm-workspace syntax (`npm run build
+    # --workspaces --if-present`), which bun does not interpret as workspace
+    # iteration — running `bun run build` would re-invoke the root script and
+    # recurse infinitely. Use bun's own workspace filter instead.
+    bun run --filter '*' build
   else
     info "Using npm because bun is unavailable"
     npm install --workspaces --include-workspace-root
