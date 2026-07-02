@@ -113,13 +113,14 @@ oc_json_merge() {
         else
           null
         end;
-      def migrate_legacy_cline_default($tmpl):
-        (if has("model") and .model == "cline/default" then .model = "cline/GaussO4.1" else . end)
-        | (if has("small_model") and .small_model == "cline/default" then .small_model = "cline/GaussO4.1" else . end)
+      def migrate_legacy_cline_models($tmpl):
+        (["cline/default", "cline/GaussO4.1"]) as $legacy
+        | (if has("model") and (.model | IN($legacy[])) then .model = "cline/GaussO4.1-CLI" else . end)
+        | (if has("small_model") and (.small_model | IN($legacy[])) then .small_model = "cline/GaussO4.1-CLI" else . end)
         | (if (.agent? | type) == "object" then
             .agent |= with_entries(
-              if (.value | type) == "object" and .value.model == "cline/default" then
-                .value.model = "cline/GaussO4.1"
+              if (.value | type) == "object" and (.value.model | IN($legacy[])) then
+                .value.model = "cline/GaussO4.1-CLI"
               else
                 .
               end
@@ -127,9 +128,8 @@ oc_json_merge() {
           else
             .
           end)
-        | (if (($tmpl.provider.cline.models.default // null) == null)
-              and (.provider.cline.models.default.name? == "Cline default (auto-detect from cline config)") then
-            del(.provider.cline.models.default)
+        | (if (.provider.cline.models? | type) == "object" then
+            .provider.cline.models |= (del(.["GaussO4.1"]) | del(.["GaussO3.3"]) | del(.default))
           else
             .
           end);
@@ -138,7 +138,7 @@ oc_json_merge() {
       | ($T * $E)
       | (merge_enabled_providers($T; $E) as $enabled
           | if $enabled != null then .enabled_providers = $enabled else . end)
-      | migrate_legacy_cline_default($T)
+      | migrate_legacy_cline_models($T)
     ' "$tmpl_file" "$existing" || rc=$?
   else
     node -e '
@@ -161,22 +161,25 @@ oc_json_merge() {
         out.enabled_providers=values.filter((v)=>!seen.has(v)&&seen.add(v));
         return out;
       }
-      function migrateLegacyClineDefault(out,t){
-        const legacy="cline/default";
-        const next="cline/GaussO4.1";
-        if(out.model===legacy) out.model=next;
-        if(out.small_model===legacy) out.small_model=next;
+      function migrateLegacyClineModels(out,t){
+        const legacy=["cline/default","cline/GaussO4.1"];
+        const next="cline/GaussO4.1-CLI";
+        if(legacy.includes(out.model)) out.model=next;
+        if(legacy.includes(out.small_model)) out.small_model=next;
         if(out.agent&&typeof out.agent==="object"&&!Array.isArray(out.agent)){
           for(const value of Object.values(out.agent)){
-            if(value&&typeof value==="object"&&!Array.isArray(value)&&value.model===legacy) value.model=next;
+            if(value&&typeof value==="object"&&!Array.isArray(value)&&legacy.includes(value.model)) value.model=next;
           }
         }
         const models=out.provider?.cline?.models;
-        const templateDefault=t.provider?.cline?.models?.default;
-        if(templateDefault===undefined&&models?.default?.name==="Cline default (auto-detect from cline config)") delete models.default;
+        if(models&&typeof models==="object"){
+          delete models["GaussO4.1"];
+          delete models["GaussO3.3"];
+          delete models.default;
+        }
         return out;
       }
-      process.stdout.write(JSON.stringify(migrateLegacyClineDefault(mergeEnabledProviders(m(T,E),T,E),T),null,2)+"\n");
+      process.stdout.write(JSON.stringify(migrateLegacyClineModels(mergeEnabledProviders(m(T,E),T,E),T),null,2)+"\n");
     ' "$existing" "$tmpl_file" || rc=$?
   fi
   rm -f "$tmpl_file"
@@ -605,30 +608,31 @@ if [ ! -f "$AGENTS_TARGET" ]; then
   ok "AGENTS.md installed: $AGENTS_TARGET"
 fi
 
-# Patch oh-my-anycli agent frontmatter: replace `model: cline/default` with
-# the configured default model. oh-my-anycli ships orchestrator.md and other
-# agents with `model: cline/default` which no longer exists as a named model;
-# this step migrates them to whatever `model` is set in the merged opencode.json.
+# Patch oh-my-anycli agent frontmatter: replace legacy model ids
+# (`cline/default`, `cline/GaussO4.1`) with the configured default model.
+# oh-my-anycli ships orchestrator.md and other agents pinned to a model id
+# that may no longer match the supported cline model list; this step migrates
+# them to whatever `model` is set in the merged opencode.json.
 OMAC_AGENTS_DIR="$HOME/.oh-my-anycli/agents"
 if [ -d "$OMAC_AGENTS_DIR" ]; then
-  step "Patching oh-my-anycli agents (cline/default → configured model)"
+  step "Patching oh-my-anycli agents (legacy model → configured model)"
   # Read the configured default model from the merged opencode.json.
   OMAC_DEFAULT_MODEL="$(node -e "
     try {
       const c = JSON.parse(require('fs').readFileSync('$TARGET', 'utf8'));
-      console.log(c.model || 'cline/GaussO4.1');
-    } catch(e) { console.log('cline/GaussO4.1'); }
-  " 2>/dev/null || echo "cline/GaussO4.1")"
+      console.log(c.model || 'cline/GaussO4.1-CLI');
+    } catch(e) { console.log('cline/GaussO4.1-CLI'); }
+  " 2>/dev/null || echo "cline/GaussO4.1-CLI")"
   _omac_patched=0
   while IFS= read -r -d '' md_file; do
-    if grep -qE '^model:[[:space:]]+cline/default' "$md_file" 2>/dev/null; then
-      sed -i -E "s|^(model:[[:space:]]+)cline/default|\1$OMAC_DEFAULT_MODEL|" "$md_file"
+    if grep -qE '^model:[[:space:]]+cline/(default|GaussO4\.1)[[:space:]]*$' "$md_file" 2>/dev/null; then
+      sed -i -E "s#^(model:[[:space:]]+)cline/(default|GaussO4\.1)[[:space:]]*\$#\1$OMAC_DEFAULT_MODEL#" "$md_file"
       ok "Patched model in: $(basename "$md_file")"
       _omac_patched=$((_omac_patched + 1))
     fi
   done < <(find "$OMAC_AGENTS_DIR" -name "*.md" -print0 2>/dev/null)
   if [ "$_omac_patched" -eq 0 ]; then
-    info "oh-my-anycli agents already up-to-date (no cline/default found)"
+    info "oh-my-anycli agents already up-to-date (no legacy model found)"
   fi
 fi
 

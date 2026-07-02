@@ -72,13 +72,13 @@ describe("cline-runner prompt spill", () => {
     const cap = capturingSpawn([COMPLETION])
     await runOnce({
       prompt: "small prompt",
-      options: { command: "cline", timeoutMs: 5000, model: "GaussO4.1" },
+      options: { command: "cline", timeoutMs: 5000, model: "GaussO4.1-CLI" },
       spawnFn: cap.fn,
     })
 
     expect(cap.captured.args).not.toBeNull()
     const args = Array.from(cap.captured.args!)
-    expect(args).toEqual(["--json", "--yolo", "-m", "GaussO4.1", "--act", "small prompt"])
+    expect(args).toEqual(["--json", "--yolo", "-m", "GaussO4.1-CLI", "--act", "small prompt"])
   })
 
   it("spills oversize prompt to a temp file and substitutes a wrapper in argv", async () => {

@@ -11,7 +11,7 @@ the OAuth login those CLIs already hold. In opencode's model picker:
 
 | Provider | Models |
 |---|---|
-| `cline` | `cline/GaussO4.1`, `cline/GaussO3.3` |
+| `cline` | `cline/GaussO4.1-CLI`, `cline/GaussO3.3-CLI` |
 | `claude` | `claude/opus-4.8-high`, `claude/opus-4.8-xhigh`, `claude/opus-4.8-max`, `claude/sonnet-high`, `claude/sonnet-xhigh`, `claude/sonnet-max` |
 | `codex` | `codex/gpt-5.4-high`, `codex/gpt-5.4-xhigh`, `codex/gpt-5.5-high`, `codex/gpt-5.5-xhigh` |
 
