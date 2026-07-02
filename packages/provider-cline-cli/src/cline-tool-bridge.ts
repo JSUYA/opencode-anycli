@@ -224,6 +224,205 @@ export function buildCommandOutputResult(output: string, exitCode?: number): {
   return { result, ok }
 }
 
+// ─── cline 0.6.0 agent-event tool schema ─────────────────────────────────────
+//
+// cline 0.6.0 (Samsung cline-sr) no longer emits legacy `say.tool` /
+// `say.command` events. Native tool activity now arrives as an `agent_event`
+// pair:
+//
+//   content_start { contentType:"tool", toolCallId, toolName, input }
+//   content_end   { contentType:"tool", toolCallId, toolName, output }
+//
+// The tool NAMES and INPUT shapes differ from the legacy schema and cline
+// batches homogeneous operations into a single call:
+//
+//   read_files    input {files:[{path}]}            output [{query,result,success}]
+//   run_commands  input {commands:[string]}         output [{query,result,success}]
+//   editor        input {path,new_text[,old_text]}  output {query,result,success}
+//
+// `bridgeAgentEventTool` fans a single cline call out to one opencode
+// tool-call/result pair per underlying operation. Unknown tools fall through
+// as one `cline:<name>` entry so activity is never silently dropped.
+
+/** A single bridged tool-call+result pair from the agent-event tool schema. */
+export interface AgentToolBridge {
+  /** opencode tool name (must match a registered LanguageModelV3FunctionTool). */
+  toolName: string
+  input: Record<string, unknown>
+  result: Record<string, unknown>
+  ok: boolean
+  /** Suffix appended to cline's toolCallId to keep multi-item calls unique. */
+  idSuffix: string
+  /** cline tool name before alias resolution — kept for telemetry. */
+  originalClineName: string
+}
+
+export function bridgeAgentEventTool(
+  clineName: string,
+  input: unknown,
+  output: unknown,
+): AgentToolBridge[] {
+  const key = normalizeClineToolName(clineName)
+  const inRec = isObject(input) ? input : {}
+  switch (key) {
+    case "readfiles":
+    case "readfile":
+    case "read":
+      return bridgeReadFiles(inRec, output, clineName)
+    case "runcommands":
+    case "runcommand":
+    case "executecommand":
+    case "execcommand":
+    case "bash":
+    case "shell":
+    case "command":
+      return bridgeRunCommands(inRec, output, clineName)
+    case "editor":
+    case "editfile":
+    case "edit":
+    case "replaceinfile":
+    case "applydiff":
+    case "writetofile":
+    case "writefile":
+    case "write":
+    case "createfile":
+    case "newfile":
+      return bridgeEditor(inRec, output, clineName)
+    default: {
+      // Unknown tool — surface as cline:<name> so opencode still shows the
+      // activity. Forward-compat lever for cline tool additions/renames.
+      const opencode = resolveOpencodeTool(clineName)
+      const outcome = firstOutcome(output)
+      return [
+        {
+          toolName: opencode ?? `cline:${clineName}`,
+          input: flattenRecord(inRec),
+          result: outcome.result,
+          ok: outcome.ok,
+          idSuffix: "",
+          originalClineName: clineName,
+        },
+      ]
+    }
+  }
+}
+
+function bridgeReadFiles(input: Record<string, unknown>, output: unknown, original: string): AgentToolBridge[] {
+  const files = Array.isArray(input["files"]) ? (input["files"] as unknown[]) : []
+  const outputs = Array.isArray(output) ? output : []
+  if (files.length === 0) {
+    // Some builds put a bare `path` on the input instead of files[].
+    const path = pickString(input["path"]) ?? pickString(input["filePath"])
+    if (path === null) return []
+    const outcome = outcomeAt(outputs, 0)
+    return [readEntry(path, outcome, original, "-r0")]
+  }
+  const out: AgentToolBridge[] = []
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i]
+    const path = isObject(f) ? pickString(f["path"]) ?? pickString(f["filePath"]) : pickString(f)
+    if (path === null) continue
+    out.push(readEntry(path, outcomeAt(outputs, i), original, `-r${i}`))
+  }
+  return out
+}
+
+function readEntry(path: string, outcome: Outcome, original: string, idSuffix: string): AgentToolBridge {
+  const result: Record<string, unknown> = { ok: outcome.ok, filePath: path }
+  if (outcome.text !== null) result["output"] = outcome.text
+  return { toolName: "read", input: { filePath: path }, result, ok: outcome.ok, idSuffix, originalClineName: original }
+}
+
+function bridgeRunCommands(input: Record<string, unknown>, output: unknown, original: string): AgentToolBridge[] {
+  const commands = Array.isArray(input["commands"])
+    ? (input["commands"] as unknown[])
+    : pickString(input["command"]) !== null
+      ? [input["command"]]
+      : []
+  const outputs = Array.isArray(output) ? output : output !== undefined && output !== null ? [output] : []
+  if (commands.length === 0) return []
+  const out: AgentToolBridge[] = []
+  for (let i = 0; i < commands.length; i++) {
+    const command = pickString(commands[i])
+    if (command === null) continue
+    const outcome = outcomeAt(outputs, i)
+    const result: Record<string, unknown> = { ok: outcome.ok }
+    if (outcome.text !== null) result["stdout"] = outcome.text
+    out.push({ toolName: "bash", input: { command }, result, ok: outcome.ok, idSuffix: `-c${i}`, originalClineName: original })
+  }
+  return out
+}
+
+function bridgeEditor(input: Record<string, unknown>, output: unknown, original: string): AgentToolBridge[] {
+  const filePath = pickString(input["path"]) ?? pickString(input["filePath"])
+  if (filePath === null) return []
+  const newText = pickString(input["new_text"]) ?? pickString(input["content"]) ?? pickString(input["newText"])
+  const oldText = pickString(input["old_text"]) ?? pickString(input["oldText"])
+  const diff = pickString(input["diff"])
+  const outcome = Array.isArray(output) ? normalizeOutcome(output[0]) : normalizeOutcome(output)
+  // old_text / diff present → in-place edit; otherwise a create/overwrite write.
+  if (oldText !== null || diff !== null) {
+    const editInput: Record<string, unknown> = { filePath }
+    if (oldText !== null) editInput["oldString"] = oldText
+    if (newText !== null) editInput["newString"] = newText
+    if (diff !== null) editInput["diff"] = diff
+    const result: Record<string, unknown> = { ok: outcome.ok, filePath }
+    if (outcome.text !== null) result["output"] = outcome.text
+    return [{ toolName: "edit", input: editInput, result, ok: outcome.ok, idSuffix: "", originalClineName: original }]
+  }
+  const writeInput: Record<string, unknown> = { filePath }
+  if (newText !== null) writeInput["content"] = newText
+  const result: Record<string, unknown> = { ok: outcome.ok, filePath }
+  if (outcome.text !== null) result["output"] = outcome.text
+  return [{ toolName: "write", input: writeInput, result, ok: outcome.ok, idSuffix: "", originalClineName: original }]
+}
+
+/** Normalized view of one cline output element ({query,result,success}). */
+interface Outcome {
+  ok: boolean
+  text: string | null
+}
+
+function outcomeAt(outputs: readonly unknown[], index: number): Outcome {
+  return normalizeOutcome(outputs[index] ?? outputs[0])
+}
+
+function firstOutcome(output: unknown): { ok: boolean; result: Record<string, unknown> } {
+  const outcome = Array.isArray(output) ? normalizeOutcome(output[0]) : normalizeOutcome(output)
+  const result: Record<string, unknown> = { ok: outcome.ok }
+  if (outcome.text !== null) result["output"] = outcome.text
+  return { ok: outcome.ok, result }
+}
+
+function normalizeOutcome(raw: unknown): Outcome {
+  if (!isObject(raw)) return { ok: true, text: null }
+  const success = raw["success"]
+  const ok = success === undefined ? true : success === true
+  const text = pickString(raw["result"]) ?? pickString(raw["output"]) ?? pickString(raw["stdout"])
+  return { ok, text }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+/** Flatten a record to JSON-serializable primitives for unknown-tool passthrough. */
+function flattenRecord(rec: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(rec)) {
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean" || v === null) {
+      out[k] = v
+    } else {
+      try {
+        out[k] = JSON.parse(JSON.stringify(v))
+      } catch {
+        /* drop */
+      }
+    }
+  }
+  return out
+}
+
 // ─── Per-tool transforms ─────────────────────────────────────────────────────
 
 type Transform = (raw: ClineToolPayload, originalName: string) => BridgedToolEvent

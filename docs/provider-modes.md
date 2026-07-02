@@ -17,7 +17,7 @@ Large prompts are handled automatically: when the flattened prompt exceeds the s
 
 ACP mode starts cline with `cline --acp` and speaks the Agent Client Protocol over stdio JSON-RPC. The prompt travels in the protocol body rather than argv, and the provider translates ACP session updates into the same opencode stream parts used by subprocess mode.
 
-ACP requires cline 2.18 or newer. Older cline versions do not ship the `--acp` transport, so leave `mode` as `subprocess` unless `cline --version` reports 2.18+.
+> **⚠️ ACP is NOT available in the Samsung `cline-sr` build (0.6.0).** That CLI has no `--acp` flag — because it enables `allowUnknownOption`, passing `--acp` is silently ignored and cline falls back to interactive TUI mode, which aborts with `error: interactive mode requires a TTY (stdin/stdout must both be terminals)` when opencode drives it over pipes. **Keep `mode: "subprocess"`** (the installed default). Subprocess mode already handles arbitrarily large prompts via the temp-file spill, so there is no functional reason to switch. Only select `mode: "acp"` against an upstream cline build that actually ships the `--acp` transport.
 
 ## Passthrough
 

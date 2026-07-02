@@ -34,9 +34,11 @@ import {
   writePromptTempFile,
 } from "./prompt-tempfile.js"
 import {
+  bridgeAgentEventTool,
   bridgeClineCommandStart,
   bridgeClineToolEvent,
   buildCommandOutputResult,
+  type AgentToolBridge,
   type BridgedToolEvent,
   type ClineToolPayload,
 } from "./cline-tool-bridge.js"
@@ -453,6 +455,11 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // Track readFile tool-calls we've already surfaced so partial→final
   // updates don't double-emit. Key: file path that goes into the call.
   const emittedReads = new Set<string>()
+  // cline 0.6.0 agent-event tool schema: `content_start` carries the tool
+  // input, `content_end` carries the output — but NOT the input. Stash the
+  // input from content_start keyed by toolCallId so we can bridge the full
+  // call+result pair once content_end lands.
+  const pendingAgentTools = new Map<string, { toolName: string; input: unknown }>()
   // Track the most recent bash tool-call so we can attach the matching
   // ask.command_output to it. cline emits the command via say.command,
   // then the output via ask.command_output — they are not joined in a
@@ -460,6 +467,39 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
   // other tool events between command and output (rare), so we only hold
   // ONE pending entry at a time and drop it if a second bash comes in.
   let pendingBashCall: { toolCallId: string; toolName: string } | null = null
+
+  /**
+   * Emit opencode tool-call/result pairs for cline 0.6.0's agent-event tool
+   * schema (bridged by bridgeAgentEventTool). Applies the same read-dedup,
+   * prompt-spill suppression, and unknown-tool text fallback as the legacy
+   * say.tool path so both schemas behave identically downstream.
+   */
+  function emitAgentTools(bridged: AgentToolBridge[], baseId: string): void {
+    for (const t of bridged) {
+      // Unknown / unmapped cline tool — opencode silently drops tool-calls
+      // whose name isn't in its registry, so surface a text marker instead.
+      if (t.toolName.startsWith("cline:")) {
+        const marker = renderToolCallAsText({ toolName: t.toolName, input: t.input })
+        if (marker !== null) emitTextIfNew("assistant", (emittedByChannel.get("assistant") ?? "") + marker)
+        continue
+      }
+      // Suppress reads of our own prompt spill file — implementation detail.
+      if (t.toolName === "read" && tempPromptFile !== null && t.input["filePath"] === tempPromptFile) {
+        continue
+      }
+      // De-dupe read by filePath (cline emits/repeats reads of the same file).
+      if (t.toolName === "read") {
+        const fp = typeof t.input["filePath"] === "string" ? t.input["filePath"] : null
+        if (fp !== null) {
+          if (emittedReads.has(fp)) continue
+          emittedReads.add(fp)
+        }
+      }
+      const toolCallId = `cline-${t.toolName}-${baseId}${t.idSuffix}`
+      enqueue({ type: "tool-call", toolCallId, toolName: t.toolName, input: t.input })
+      enqueue({ type: "tool-result", toolCallId, toolName: t.toolName, result: t.result, isError: !t.ok })
+    }
+  }
 
   function handleEvent(ev: ClineEvent) {
     if (isTaskStarted(ev)) {
@@ -500,6 +540,15 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
           // up. We DO NOT mirror to emitTextIfNew's prefix-tracking because
           // these chunks aren't cumulative.
           const contentType = (body as { contentType?: unknown }).contentType
+          if (contentType === "tool") {
+            // cline 0.6.0 native tool call. Stash the input; the matching
+            // content_end carries the output and triggers the bridge.
+            const b = body as { toolCallId?: unknown; toolName?: unknown; input?: unknown }
+            if (typeof b.toolCallId === "string" && typeof b.toolName === "string") {
+              pendingAgentTools.set(b.toolCallId, { toolName: b.toolName, input: b.input })
+            }
+            return
+          }
           if (contentType !== undefined && contentType !== "text") return
           const text = (body as { text?: unknown }).text
           if (typeof text === "string" && text.length > 0) {
@@ -511,12 +560,28 @@ async function* runStreamInternal(input: RunInput): AsyncGenerator<StreamEvent, 
           }
           return
         }
-        case "content_end":
+        case "content_end": {
+          const contentType = (body as { contentType?: unknown }).contentType
+          if (contentType === "tool") {
+            // cline 0.6.0 native tool result. Combine the stashed input with
+            // this event's output and bridge to opencode tool-call/result
+            // parts (see cline-tool-bridge.ts bridgeAgentEventTool).
+            const b = body as { toolCallId?: unknown; toolName?: unknown; output?: unknown }
+            const callId = typeof b.toolCallId === "string" ? b.toolCallId : null
+            const stashed = callId !== null ? pendingAgentTools.get(callId) : undefined
+            if (callId !== null) pendingAgentTools.delete(callId)
+            const clineName = stashed?.toolName ?? (typeof b.toolName === "string" ? b.toolName : "")
+            if (clineName.length > 0) {
+              emitAgentTools(bridgeAgentEventTool(clineName, stashed?.input, b.output), callId ?? clineName)
+            }
+            return
+          }
           // `content_end` carries the FULL concatenated text — we already
           // streamed each chunk via `content_start`, so dropping it avoids
           // duplication. (Unlike say.text→completion_result in the legacy
           // schema, this end event is not an extension of the deltas.)
           return
+        }
         case "usage": {
           // Interim cumulative snapshot. Use totalInputTokens etc. when
           // present so consecutive iterations show the running total, not
