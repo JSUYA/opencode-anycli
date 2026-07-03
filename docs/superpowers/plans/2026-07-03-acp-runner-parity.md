@@ -398,3 +398,203 @@ In `src/cline-runner.ts`, extend the `StreamEvent` union — add the variant aft
 export type StreamEvent =
   | { type: "text-delta"; delta: string }
   | { type: "reasoning-delta"; delta: string }
+  | {
+      type: "tool-call"
+      toolCallId: string
+      toolName: string
+      input: Record<string, unknown>
+    }
+  | {
+      type: "tool-result"
+      toolCallId: string
+      toolName: string
+      result: Record<string, unknown>
+      isError?: boolean
+    }
+  | { type: "finish"; usage: RunResult["usage"]; parseErrors: number; contextMax?: number }
+  | { type: "error"; error: Error }
+```
+
+In `src/types.ts`, extend `ClineMode`:
+
+```ts
+export type ClineMode = "auto" | "subprocess" | "acp" | "passthrough"
+```
+
+And update its doc comment to add:
+
+```ts
+ *  - "auto" (recommended default) — probe `cline --help` once; use "acp"
+ *    when the binary advertises `--acp` (cline-sr 0.5.1), else "subprocess"
+ *    (cline-sr 0.6.0 removed the flag). See cline-capabilities.ts.
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run reasoning-mode-types` then `../../node_modules/.bin/tsc --noEmit`
+Expected: PASS; typecheck clean.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/cline-runner.ts src/types.ts test/reasoning-mode-types.test.ts
+git commit -m "feat(provider): add reasoning-delta StreamEvent and auto ClineMode"
+```
+
+---
+
+### Task 4: ACP runner — full tool bridging + thought→reasoning
+
+**Files:**
+- Modify: `src/cline-acp-runner.ts` (`translateSessionUpdate`, its `ctx` type, `runOnceAcp`, imports; remove/retire `pickReadFilePath`)
+- Test: `test/cline-acp-runner-bridge.test.ts` (create)
+
+**Interfaces:**
+- Consumes: `bridgeAcpTool`, `buildAcpToolResult` (Task 1); `StreamEvent` reasoning-delta (Task 3).
+- Produces: `translateSessionUpdate` now emits `tool-call` + `tool-result` for read/execute/edit/search, `reasoning-delta` for thoughts, and text fallbacks for unmapped kinds. New `ctx.pendingTools: Map<string, { toolName: string; kind: string | undefined }>`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/cline-acp-runner-bridge.test.ts`. This drives `translateSessionUpdate` indirectly by importing it; to keep it unit-level, export `translateSessionUpdate` from the module (add `export` in Step 3) and test it directly:
+
+```ts
+import { describe, it, expect } from "vitest"
+import { translateSessionUpdate } from "../src/cline-acp-runner.js"
+import type { StreamEvent } from "../src/cline-runner.js"
+
+function ctx() {
+  const events: StreamEvent[] = []
+  return {
+    events,
+    ctx: {
+      enqueue: (e: StreamEvent) => events.push(e),
+      emittedReads: new Set<string>(),
+      assistantState: { acc: "" },
+      pendingTools: new Map<string, { toolName: string; kind: string | undefined }>(),
+    },
+  }
+}
+
+describe("translateSessionUpdate — ACP tool bridging", () => {
+  it("bridges read tool_call + completed update", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "t1", kind: "read", rawInput: { path: "/tmp/a.txt" } } as any, c)
+    translateSessionUpdate({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed", rawOutput: { result: "FILE" } } as any, c)
+    const call = events.find((e) => e.type === "tool-call") as any
+    const res = events.find((e) => e.type === "tool-result") as any
+    expect(call.toolName).toBe("read")
+    expect(call.input.filePath).toBe("/tmp/a.txt")
+    expect(res.toolName).toBe("read")
+    expect(res.result.output).toBe("FILE")
+    expect(res.isError).toBeFalsy()
+  })
+
+  it("bridges execute → bash with stdout", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "t2", kind: "execute", rawInput: { command: "echo hi" } } as any, c)
+    translateSessionUpdate({ sessionUpdate: "tool_call_update", toolCallId: "t2", status: "completed", rawOutput: "hi\n" } as any, c)
+    const call = events.find((e) => e.type === "tool-call") as any
+    const res = events.find((e) => e.type === "tool-result") as any
+    expect(call.toolName).toBe("bash")
+    expect(call.input.command).toBe("echo hi")
+    expect(res.result.stdout).toBe("hi\n")
+  })
+
+  it("marks failed status as isError", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "t3", kind: "execute", rawInput: { command: "false" } } as any, c)
+    translateSessionUpdate({ sessionUpdate: "tool_call_update", toolCallId: "t3", status: "failed", rawOutput: "" } as any, c)
+    const res = events.find((e) => e.type === "tool-result") as any
+    expect(res.isError).toBe(true)
+  })
+
+  it("routes agent_thought_chunk to reasoning-delta (not text)", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hmm" } } as any, c)
+    expect(events).toEqual([{ type: "reasoning-delta", delta: "hmm" }])
+  })
+
+  it("emits assistant text via text-delta", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "answer" } } as any, c)
+    expect(events).toEqual([{ type: "text-delta", delta: "answer" }])
+  })
+
+  it("emits a text fallback for unmapped kinds", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "t4", kind: "fetch", title: "Fetch url", rawInput: {} } as any, c)
+    const txt = events.find((e) => e.type === "text-delta") as any
+    expect(txt.delta).toContain("fetch")
+    expect(events.some((e) => e.type === "tool-call")).toBe(false)
+  })
+
+  it("does not emit duplicate read tool-calls for the same file", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "a", kind: "read", rawInput: { path: "/tmp/x" } } as any, c)
+    translateSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "b", kind: "read", rawInput: { path: "/tmp/x" } } as any, c)
+    expect(events.filter((e) => e.type === "tool-call")).toHaveLength(1)
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run cline-acp-runner-bridge`
+Expected: FAIL — `translateSessionUpdate` not exported / signature mismatch / reasoning-delta not emitted.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/cline-acp-runner.ts`:
+
+(a) Update imports at top:
+
+```ts
+import { bridgeAcpTool, buildAcpToolResult } from "./cline-tool-bridge.js"
+```
+
+(b) In `runStreamAcpInternal`, replace the `emittedReads` + `assistantState` block with an added `pendingTools` map and pass it into `translateSessionUpdate`:
+
+```ts
+  const emittedReads = new Set<string>()
+  const assistantState = { acc: "" }
+  const pendingTools = new Map<string, { toolName: string; kind: string | undefined }>()
+```
+
+and in the `sessionUpdate` client callback:
+
+```ts
+    sessionUpdate: async ({ update }) => {
+      try {
+        translateSessionUpdate(update, { enqueue, emittedReads, assistantState, pendingTools })
+      } catch (err) {
+        if (DEBUG) process.stderr.write(`[cline-acp] sessionUpdate error: ${String(err)}\n`)
+      }
+    },
+```
+
+(c) Replace the whole `translateSessionUpdate` function and its `ctx` type, and delete `pickReadFilePath` (now unused). Export the function for testing:
+
+```ts
+export function translateSessionUpdate(
+  update: schema.SessionUpdate,
+  ctx: {
+    enqueue: (ev: StreamEvent) => void
+    emittedReads: Set<string>
+    assistantState: { acc: string }
+    pendingTools: Map<string, { toolName: string; kind: string | undefined }>
+  },
+): void {
+  switch (update.sessionUpdate) {
+    case "agent_thought_chunk": {
+      // cline reasoning — route to a reasoning stream part, NOT the answer text.
+      const text = blockToText(update.content)
+      if (text) ctx.enqueue({ type: "reasoning-delta", delta: text })
+      return
+    }
+    case "agent_message_chunk": {
+      const text = blockToText(update.content)
+      if (!text) return
+      if (text === ctx.assistantState.acc) return
+      if (ctx.assistantState.acc.length > 0 && text.startsWith(ctx.assistantState.acc)) {
+        const tail = text.slice(ctx.assistantState.acc.length)
+        ctx.assistantState.acc = text
