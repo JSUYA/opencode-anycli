@@ -48,6 +48,8 @@ prompt-*.log
 cline-open*
 cline-raw*
 
-# Lockfile is regenerated on every npm install / install.sh run; tracking
-# it churns the diff with no useful signal and breaks --update auto-stash.
+# Lockfiles are regenerated on every npm/bun install / install.sh run; tracking
+# them churns the diff with no useful signal and breaks --update auto-stash.
 package-lock.json
+bun.lock
+bun.lockb
