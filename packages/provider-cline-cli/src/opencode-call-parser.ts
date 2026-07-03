@@ -145,8 +145,10 @@ export function buildProtocolSection(tools: readonly ProtocolToolDescriptor[]): 
     "To delegate to a registered opencode tool, emit ONE tag on its own line, BEFORE prose:",
   )
   // Tool input shapes come from opencode's actual tool schemas:
-  //   task  → { description, prompt, subagent_type }   (all required)
-  //   skill → { name }                                  (required)
+  //   task          → { description, prompt, subagent_type }   (all required)
+  //   skill         → { name }                                  (required)
+  //   lane_dispatch → { agent, prompt, label? }   (omac-scheduler plugin)
+  //   lane_collect  → { laneIds?, timeoutSeconds? } (omac-scheduler plugin)
   // Names are LOWERCASE — opencode registers tools as lowercase identifiers
   // (verified against opencode-ai 1.14.x). Mismatched case would silently
   // drop the dispatch.
@@ -158,6 +160,18 @@ export function buildProtocolSection(tools: readonly ProtocolToolDescriptor[]): 
   if (names.has("skill")) {
     lines.push(
       '  <opencode-call name="skill">{"name":"<skill-name-from-available_skills>"}</opencode-call>',
+    )
+  }
+  // omac-scheduler background lanes: emit one lane_dispatch per INDEPENDENT
+  // subtask (they run concurrently), then a single lane_collect to gather.
+  if (names.has("lane_dispatch")) {
+    lines.push(
+      '  <opencode-call name="lane_dispatch">{"agent":"<agent>","prompt":"<text>","label":"<short label>"}</opencode-call>',
+    )
+  }
+  if (names.has("lane_collect")) {
+    lines.push(
+      '  <opencode-call name="lane_collect">{"laneIds":["<laneId>"],"timeoutSeconds":300}</opencode-call>',
     )
   }
   lines.push(
@@ -173,7 +187,13 @@ export function buildProtocolSection(tools: readonly ProtocolToolDescriptor[]): 
  * actual tool registry (verified against opencode-ai 1.14.x binary; see
  * the comment in buildProtocolSection above).
  */
-export const SUPPORTED_OPENCODE_CALL_TOOLS: ReadonlySet<string> = new Set(["task", "skill"])
+export const SUPPORTED_OPENCODE_CALL_TOOLS: ReadonlySet<string> = new Set([
+  "task",
+  "skill",
+  // omac-scheduler plugin tools (true background parallel lanes).
+  "lane_dispatch",
+  "lane_collect",
+])
 
 /**
  * Detect a slash-command-style skill dispatch in opencode's command
