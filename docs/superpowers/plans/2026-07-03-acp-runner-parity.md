@@ -798,3 +798,203 @@ In `src/language-model.ts` `doStream`, inside the `start(controller)` body, add 
         const closeReasoningBlock = () => {
           if (activeReasoningBlockId === null) return
           safeEnqueue({ type: "reasoning-end", id: activeReasoningBlockId })
+          activeReasoningBlockId = null
+        }
+```
+
+In the same function, update `openTextBlock` to close any open reasoning block first (reasoning must not straddle text):
+
+```ts
+        const openTextBlock = (): string => {
+          if (activeTextBlockId !== null) return activeTextBlockId
+          closeReasoningBlock()
+          const id = `text-${textBlockCounter++}`
+          safeEnqueue({ type: "text-start", id })
+          activeTextBlockId = id
+          return id
+        }
+```
+
+In the `for await (const ev of streamFn(...))` loop, add a branch BEFORE the `text-delta` branch:
+
+```ts
+            if (ev.type === "reasoning-delta") {
+              const id = openReasoningBlock()
+              safeEnqueue({ type: "reasoning-delta", id, delta: ev.delta })
+            } else if (ev.type === "text-delta") {
+```
+
+(convert the existing `if (ev.type === "text-delta")` to `else if`).
+
+Before emitting any `tool-call` (the `ev.type === "tool-call"` branch, which calls `closeTextBlock()`), also close reasoning:
+
+```ts
+            } else if (ev.type === "tool-call") {
+              closeReasoningBlock()
+              closeTextBlock()
+```
+
+And in the parser tool-call path (`emitOpencodeCalls`) and at stream end, ensure `closeReasoningBlock()` runs before `closeTextBlock()` / `safeClose()`. Add `closeReasoningBlock()` immediately before the final `closeTextBlock()` (both the success flush path ~line 563 and the catch path ~line 596):
+
+```ts
+          closeReasoningBlock()
+          closeTextBlock()
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run language-model-reasoning` then `../../node_modules/.bin/tsc --noEmit`
+Expected: PASS; typecheck clean.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/language-model.ts test/language-model-reasoning.test.ts
+git commit -m "feat(provider): render ACP reasoning-delta as V3 reasoning parts"
+```
+
+---
+
+### Task 6: `doGenerate`/`doStream` resolve `mode:"auto"` via probe
+
+**Files:**
+- Modify: `src/language-model.ts` (constructor default + a `resolveMode` helper used by `doGenerate` ~line 225 and `doStream` ~line 386)
+- Test: `test/language-model-automode.test.ts` (create)
+
+**Interfaces:**
+- Consumes: `detectAcpSupport` (Task 2).
+- Produces: when `this.options.mode === "auto"`, the runner is chosen by `await detectAcpSupport(command)` — ACP if supported, else subprocess. Explicit `"acp"`/`"subprocess"` bypass the probe.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/language-model-automode.test.ts`. Use `vi.mock` factories (hoisted) for the two runner modules AND the capabilities module, so the SUT's direct named imports are intercepted:
+
+```ts
+import { describe, it, expect, vi, beforeEach } from "vitest"
+
+vi.mock("../src/cline-capabilities.js", async (orig) => {
+  const actual = await (orig() as Promise<Record<string, unknown>>)
+  return { ...actual, detectAcpSupport: vi.fn() }
+})
+vi.mock("../src/cline-acp-runner.js", async (orig) => {
+  const actual = await (orig() as Promise<Record<string, unknown>>)
+  return { ...actual, runStreamAcp: vi.fn() }
+})
+vi.mock("../src/cline-runner.js", async (orig) => {
+  const actual = await (orig() as Promise<Record<string, unknown>>)
+  return { ...actual, runStream: vi.fn() }
+})
+
+import { detectAcpSupport } from "../src/cline-capabilities.js"
+import { runStreamAcp } from "../src/cline-acp-runner.js"
+import { runStream } from "../src/cline-runner.js"
+import { ClineLanguageModel } from "../src/language-model.js"
+
+const usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, totalTokens: 0, totalCost: undefined }
+const fn = (x: unknown) => x as unknown as ReturnType<typeof vi.fn>
+async function* finishOnly() {
+  yield { type: "finish", usage, parseErrors: 0 }
+}
+
+async function drain(model: ClineLanguageModel) {
+  const { stream } = await model.doStream({ prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }] } as any)
+  const reader = stream.getReader()
+  for (;;) { const { done } = await reader.read(); if (done) break }
+}
+
+describe("auto mode resolution", () => {
+  beforeEach(() => {
+    fn(runStreamAcp).mockReset().mockImplementation(finishOnly)
+    fn(runStream).mockReset().mockImplementation(finishOnly)
+  })
+
+  it("uses ACP runner when --acp is supported", async () => {
+    fn(detectAcpSupport).mockResolvedValue(true)
+    await drain(new ClineLanguageModel("GaussO4.1-CLI", { cli: "cline", mode: "auto" }))
+    expect(fn(runStreamAcp)).toHaveBeenCalled()
+    expect(fn(runStream)).not.toHaveBeenCalled()
+  })
+
+  it("uses subprocess runner when --acp is NOT supported", async () => {
+    fn(detectAcpSupport).mockResolvedValue(false)
+    await drain(new ClineLanguageModel("GaussO4.1-CLI", { cli: "cline", mode: "auto" }))
+    expect(fn(runStream)).toHaveBeenCalled()
+    expect(fn(runStreamAcp)).not.toHaveBeenCalled()
+  })
+})
+```
+
+> `resolveMode` calls `detectAcpSupport` via the module import, which the `vi.mock` above replaces — so no real `--help` probe runs. If a future vitest config breaks factory mocks, fall back to priming the real cache: `await detectAcpSupport("cmd", fakeHelpSpawn)` then assert `(model as any).resolveMode()` returns the expected string (command must match).
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run language-model-automode`
+Expected: FAIL — `"auto"` currently falls through to the `mode === "acp" ? ... : subprocess` ternary, always picking subprocess; the ACP test case fails.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/language-model.ts`:
+
+(a) Import the probe:
+
+```ts
+import { detectAcpSupport } from "./cline-capabilities.js"
+```
+
+(b) Add a private helper on `ClineLanguageModel`:
+
+```ts
+  /** Resolve the effective transport, running the --acp probe for "auto". */
+  private async resolveMode(): Promise<"acp" | "subprocess"> {
+    if (this.options.mode === "acp") return "acp"
+    if (this.options.mode === "subprocess" || this.options.mode === "passthrough") return "subprocess"
+    // "auto" (or any unrecognised value) → capability probe.
+    return (await detectAcpSupport(this.options.command)) ? "acp" : "subprocess"
+  }
+```
+
+(c) In `doGenerate` (cline branch), replace:
+
+```ts
+    const runner = this.options.mode === "acp" ? runOnceAcp : runOnce
+```
+with:
+
+```ts
+    const effectiveMode = await this.resolveMode()
+    const runner = effectiveMode === "acp" ? runOnceAcp : runOnce
+```
+
+and replace the two `this.options.mode === "acp"` uses in the same call (usePromptFile + timeoutMs) with `effectiveMode === "acp"`:
+
+```ts
+      usePromptFile: effectiveMode !== "acp",
+      options: {
+        command: this.options.command,
+        timeoutMs: effectiveMode === "acp" ? 0 : this.options.timeoutMs,
+```
+
+(d) In `doStream` (cline branch), replace:
+
+```ts
+    const timeoutMs = this.options.mode === "acp" ? 0 : this.options.timeoutMs
+    ...
+    const streamFn = this.options.mode === "acp" ? runStreamAcp : runStream
+```
+with:
+
+```ts
+    const effectiveMode = await this.resolveMode()
+    const timeoutMs = effectiveMode === "acp" ? 0 : this.options.timeoutMs
+    ...
+    const streamFn = effectiveMode === "acp" ? runStreamAcp : runStream
+```
+
+(e) Keep the constructor default as-is (`options.mode ?? "subprocess"`) BUT change it to `?? "auto"` so an unset mode auto-detects:
+
+```ts
+      mode: options.mode ?? "auto",
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
