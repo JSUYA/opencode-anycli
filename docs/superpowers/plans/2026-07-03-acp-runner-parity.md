@@ -198,3 +198,203 @@ git commit -m "feat(provider): add bridgeAcpTool for ACP tool-call mapping"
 - Test: `test/cline-capabilities.test.ts`
 
 **Interfaces:**
+- Produces:
+  - `detectAcpSupport(command: string, spawnFn?: typeof import("node:child_process").spawn): Promise<boolean>` — true iff `<command> --help` output contains a `--acp` token. Cached per `command`. Errors/timeout → `false`.
+  - `clearAcpSupportCache(): void` — test seam / cache reset.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/cline-capabilities.test.ts`:
+
+```ts
+import { describe, it, expect, beforeEach } from "vitest"
+import { EventEmitter } from "node:events"
+import { Readable } from "node:stream"
+import type { ChildProcessWithoutNullStreams } from "node:child_process"
+import { detectAcpSupport, clearAcpSupportCache } from "../src/cline-capabilities.js"
+
+function fakeHelp(stdout: string, code = 0) {
+  return ((_cmd: string, _args?: readonly string[], _opts?: object) => {
+    const p = new EventEmitter() as EventEmitter & { stdout: Readable; stderr: Readable; kill: () => boolean }
+    p.stdout = new Readable({ read() {} })
+    p.stderr = new Readable({ read() {} })
+    p.kill = () => true
+    setTimeout(() => {
+      p.stdout.push(stdout)
+      p.stdout.push(null)
+      p.stderr.push(null)
+      setTimeout(() => p.emit("close", code, null), 2)
+    }, 0)
+    return p as unknown as ChildProcessWithoutNullStreams
+  }) as unknown as typeof import("node:child_process").spawn
+}
+
+describe("detectAcpSupport", () => {
+  beforeEach(() => clearAcpSupportCache())
+
+  it("returns true when --help lists --acp", async () => {
+    const help = "Options:\n  --json\n  --acp   Run in ACP mode\n  --tui\n"
+    expect(await detectAcpSupport("cline", fakeHelp(help))).toBe(true)
+  })
+
+  it("returns false when --help has no --acp", async () => {
+    const help = "Options:\n  --json\n  --auto-approve <boolean>\n"
+    expect(await detectAcpSupport("cline", fakeHelp(help))).toBe(false)
+  })
+
+  it("caches the result per command (probe runs once)", async () => {
+    let calls = 0
+    const counting = ((c: string, a?: readonly string[], o?: object) => {
+      calls++
+      return (fakeHelp("  --acp\n") as unknown as (c: string, a?: readonly string[], o?: object) => ChildProcessWithoutNullStreams)(c, a, o)
+    }) as unknown as typeof import("node:child_process").spawn
+    await detectAcpSupport("clineX", counting)
+    await detectAcpSupport("clineX", counting)
+    expect(calls).toBe(1)
+  })
+
+  it("returns false when spawn throws", async () => {
+    const throwing = (() => { throw new Error("ENOENT") }) as unknown as typeof import("node:child_process").spawn
+    expect(await detectAcpSupport("missing", throwing)).toBe(false)
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run cline-capabilities`
+Expected: FAIL — cannot find module `../src/cline-capabilities.js`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `src/cline-capabilities.ts`:
+
+```ts
+// Runtime detection of cline CLI capabilities.
+//
+// cline-sr's flag surface changed across versions (0.5.1 ships `--acp`, 0.6.0
+// removed it). We probe `<command> --help` once per command and cache the
+// result so the provider can auto-select the ACP vs subprocess transport
+// without the user hand-editing `mode`.
+
+import { spawn as nodeSpawn } from "node:child_process"
+
+type SpawnFn = typeof nodeSpawn
+
+const acpSupportCache = new Map<string, Promise<boolean>>()
+
+/** True iff `<command> --help` advertises a `--acp` flag. Cached per command. */
+export function detectAcpSupport(command: string, spawnFn: SpawnFn = nodeSpawn): Promise<boolean> {
+  let cached = acpSupportCache.get(command)
+  if (cached === undefined) {
+    cached = probeAcpSupport(command, spawnFn)
+    acpSupportCache.set(command, cached)
+  }
+  return cached
+}
+
+/** Reset the probe cache (tests / cline upgrade). */
+export function clearAcpSupportCache(): void {
+  acpSupportCache.clear()
+}
+
+function probeAcpSupport(command: string, spawnFn: SpawnFn): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const done = (v: boolean) => {
+      if (settled) return
+      settled = true
+      resolve(v)
+    }
+    let child: ReturnType<SpawnFn>
+    try {
+      child = spawnFn(command, ["--help"], { stdio: ["ignore", "pipe", "pipe"] })
+    } catch {
+      done(false)
+      return
+    }
+    let out = ""
+    const onData = (c: unknown) => {
+      out += String(c)
+    }
+    child.stdout?.on("data", onData)
+    child.stderr?.on("data", onData)
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        /* ignore */
+      }
+      done(false)
+    }, 5000)
+    timer.unref?.()
+    child.on("error", () => {
+      clearTimeout(timer)
+      done(false)
+    })
+    child.on("close", () => {
+      clearTimeout(timer)
+      done(/(^|\s)--acp(\s|$)/.test(out))
+    })
+  })
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run cline-capabilities`
+Expected: PASS (4 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/cline-capabilities.ts test/cline-capabilities.test.ts
+git commit -m "feat(provider): add detectAcpSupport --acp capability probe"
+```
+
+---
+
+### Task 3: Add `reasoning-delta` StreamEvent + `"auto"` ClineMode
+
+**Files:**
+- Modify: `src/cline-runner.ts` (`StreamEvent` union, ~line 125)
+- Modify: `src/types.ts` (`ClineMode`, ~line 23)
+
+**Interfaces:**
+- Produces: `StreamEvent` gains `{ type: "reasoning-delta"; delta: string }`. `ClineMode` gains `"auto"`.
+- Consumes: nothing new.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/reasoning-mode-types.test.ts`:
+
+```ts
+import { describe, it, expect } from "vitest"
+import type { StreamEvent } from "../src/cline-runner.js"
+import type { ClineMode } from "../src/types.js"
+
+describe("type surface", () => {
+  it("StreamEvent accepts reasoning-delta", () => {
+    const ev: StreamEvent = { type: "reasoning-delta", delta: "thinking" }
+    expect(ev.type).toBe("reasoning-delta")
+  })
+  it("ClineMode accepts auto", () => {
+    const m: ClineMode = "auto"
+    expect(m).toBe("auto")
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run reasoning-mode-types`
+Expected: FAIL at typecheck — `"reasoning-delta"` / `"auto"` not assignable. (Vitest compiles per-file; the test errors.)
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/cline-runner.ts`, extend the `StreamEvent` union — add the variant after `text-delta`:
+
+```ts
+export type StreamEvent =
+  | { type: "text-delta"; delta: string }
+  | { type: "reasoning-delta"; delta: string }
