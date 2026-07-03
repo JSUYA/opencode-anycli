@@ -17,7 +17,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { Readable, Writable } from "node:stream"
+import { Readable, Writable, Transform } from "node:stream"
 import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION, type Client } from "@agentclientprotocol/sdk"
 import type * as schema from "@agentclientprotocol/sdk"
 import type { ClineUsage, RunResult } from "./types.js"
@@ -26,6 +26,35 @@ import { clineDataDir, readPersistedTaskUsage } from "./cline-runner.js"
 import { bridgeAcpTool, buildAcpToolResult } from "./cline-tool-bridge.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
+
+/**
+ * A Transform that forwards only lines that look like JSON-RPC objects (trimmed
+ * line starts with `{`) and drops everything else. cline's stdout is the ACP
+ * transport, so during normal operation every line is a JSON object; the only
+ * non-JSON output is shutdown noise (an ANSI "SIGTERM received…" banner) which
+ * would otherwise make the SDK's ndJsonStream throw an uncaught JSON parse
+ * error and dump a stack trace to the user's terminal.
+ */
+function jsonLinesOnly(): Transform {
+  let buf = ""
+  const keep = (line: string): boolean => line.replace(/\[[0-9;?]*[A-Za-z]/g, "").trim().startsWith("{")
+  return new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      buf += chunk.toString("utf8")
+      let nl: number
+      let out = ""
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl)
+        buf = buf.slice(nl + 1)
+        if (keep(line)) out += line + "\n"
+      }
+      cb(null, out.length > 0 ? Buffer.from(out, "utf8") : undefined)
+    },
+    flush(cb) {
+      cb(null, keep(buf) ? Buffer.from(buf, "utf8") : undefined)
+    },
+  })
+}
 
 export async function runOnceAcp(input: RunInput): Promise<RunResult> {
   let finalText = ""
@@ -134,7 +163,15 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   }
 
   // Stream conversion: Node child stdio ↔ Web streams the SDK expects.
-  const inputBytes = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>
+  // cline's stdout is the JSON-RPC transport — every line SHOULD be a JSON
+  // object. But on shutdown cline's SIGTERM handler prints an ANSI banner
+  // ("SIGTERM received, shutting down…") to that same stream. The SDK's
+  // ndJsonStream JSON.parses every line and throws (uncaught → terminal stack
+  // dump at sdk/dist/stream.js) on that banner. Interpose a line filter that
+  // drops anything that isn't a JSON object before the SDK sees it.
+  const filteredStdout = child.stdout.pipe(jsonLinesOnly())
+  filteredStdout.on("error", () => {})
+  const inputBytes = Readable.toWeb(filteredStdout) as ReadableStream<Uint8Array>
   const outputBytes = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>
   const stream = ndJsonStream(outputBytes, inputBytes)
 
