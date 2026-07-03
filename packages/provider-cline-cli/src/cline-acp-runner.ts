@@ -63,19 +63,38 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   const args = ["--acp", ...(options.extraArgs ?? [])]
   const env = { ...process.env, ...(options.env ?? {}) }
 
-  // stderr inherited so cline's diagnostics still surface; stdin/stdout are
-  // the JSON-RPC transport.
+  // stdin/stdout are the JSON-RPC transport. stderr is PIPED (not inherited)
+  // and forwarded to our stderr only while the turn is live. On teardown
+  // (normal finish / abort / error) cline writes shutdown noise — a "SIGTERM
+  // received" banner and, when the host is exiting mid-turn, EPIPE crash-dumps
+  // as its transport pipe breaks. Piping lets us stop forwarding so that noise
+  // never reaches the user's terminal; and if the host process dies outright,
+  // the pipe's read end closes with it, so an orphaned cline's stderr writes
+  // fail silently instead of flooding the terminal.
   let child: ChildProcessWithoutNullStreams
   try {
     child = spawn(options.command, args, {
       cwd: options.cwd,
       env,
-      stdio: ["pipe", "pipe", "inherit"],
+      stdio: ["pipe", "pipe", "pipe"],
     }) as unknown as ChildProcessWithoutNullStreams
   } catch (err) {
     yield { type: "error", error: wrapErr(err, `Failed to spawn cline (${options.command} --acp)`) }
     return
   }
+
+  // True while the turn is live; flipped off the instant we start tearing down
+  // so cline's shutdown chatter is dropped rather than printed.
+  let forwardDiag = true
+  child.stderr.on("data", (chunk: Buffer) => {
+    if (forwardDiag) process.stderr.write(chunk)
+  })
+  // Once cline exits or the host tears down, our writes (stdin) or cline's
+  // reads/writes can EPIPE; an unhandled 'error' on these pipes would crash the
+  // host instead of ending quietly. Swallow them.
+  child.stdin.on("error", () => {})
+  child.stdout.on("error", () => {})
+  child.stderr.on("error", () => {})
 
   // Track exit cause so we can surface a real error in `close` instead of
   // silently emitting a finish event.
@@ -84,6 +103,9 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
 
   const onAbort = () => {
     killReason = "abort"
+    // Stop forwarding cline's stderr: aborting mid-turn is exactly when it
+    // emits the SIGTERM banner + EPIPE crash-dumps we want to hide.
+    forwardDiag = false
     if (DEBUG) process.stderr.write(`[cline-acp] aborted — killing pid ${child.pid}\n`)
     child.kill("SIGTERM")
   }
@@ -189,12 +211,16 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
       // (handled by the caller / language-model layer) remains the source
       // of truth.
       void result
+      // Turn complete — stop forwarding cline's stderr before it shuts down so
+      // its EOF/SIGTERM banner and any EPIPE chatter aren't printed.
+      forwardDiag = false
       // Closing stdin lets cline detect EOF and shut down cleanly. If we
       // SIGTERM instead, cline's signal handler emits ANSI escapes +
       // "SIGTERM received…" to stdout, which the SDK's NDJSON parser
       // logs as a parse error. EOF avoids that noise entirely.
       try { child.stdin.end() } catch { /* ignore */ }
     } catch (err) {
+      forwardDiag = false
       killReason = killReason ?? "client-error"
       exitErr = wrapErr(err, "cline ACP turn failed")
       try { child.kill("SIGTERM") } catch { /* ignore */ }
@@ -202,10 +228,12 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   })()
 
   child.on("error", (err) => {
+    forwardDiag = false
     exitErr = wrapErr(err, "cline subprocess error")
     finish()
   })
   child.on("close", (code, sigterm) => {
+    forwardDiag = false
     signal?.removeEventListener("abort", onAbort)
     if (killReason === "abort") {
       exitErr = new Error(`cline ACP aborted by caller (signal ${sigterm ?? "SIGTERM"})`)
