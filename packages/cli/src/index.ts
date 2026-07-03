@@ -16,6 +16,7 @@ import { homedir } from "node:os"
 import { resolveConfig, defaultConfigPath } from "./config.js"
 import { checkOpencode, checkCline } from "./ensure-opencode.js"
 import { materializeTempConfig } from "./temp-config.js"
+import { printClineVersionExitNotice } from "./version-notice.js"
 
 const VERSION = "0.1.0"
 
@@ -488,6 +489,8 @@ async function main(): Promise<void> {
     process.stderr.write(`cline not available:\n${cl.hint}\n`)
     process.exit(1)
   }
+  // Captured for the on-exit version notice (see printClineVersionExitNotice).
+  const clineVersion = cl.version
 
   // Ensure config file exists.
   const cfg = resolveConfig({ configFlag: args.config, init: args.init })
@@ -568,6 +571,7 @@ async function main(): Promise<void> {
   }
   const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
   child.on("close", (code, signal) => {
+    printClineVersionExitNotice(clineVersion)
     if (signal) {
       process.exit(1)
     }

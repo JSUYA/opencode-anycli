@@ -673,6 +673,42 @@ else
   fi
 fi
 
+# ─── 6b. Install the cline-version-notify plugin ─────────────────────────────
+# Ships a small opencode plugin that shows the installed cline version as a TUI
+# toast on session start. We copy it into the wrapper-private plugin dir and
+# union its file:// URL into the config's `plugin[]` array. A dedicated step
+# (not the template merge) is required because deep-merge lets the EXISTING
+# `plugin[]` win wholesale, so a template-listed entry would never reach an
+# already-installed config on re-run.
+step "Installing cline-version-notify plugin"
+PLUGIN_DIR="$CONFIG_DIR/plugin"
+PLUGIN_SRC="$REPO_DIR/templates/plugin/cline-version-notify.mjs"
+if [ -f "$PLUGIN_SRC" ]; then
+  mkdir -p "$PLUGIN_DIR"
+  cp "$PLUGIN_SRC" "$PLUGIN_DIR/cline-version-notify.mjs"
+  PLUGIN_URL="file://$PLUGIN_DIR/cline-version-notify.mjs"
+  if node -e '
+    const fs = require("fs");
+    const [cfgPath, url] = process.argv.slice(1);
+    let c = {};
+    try { c = JSON.parse(fs.readFileSync(cfgPath, "utf8")); } catch (_) {}
+    if (!Array.isArray(c.plugin)) c.plugin = [];
+    if (!c.plugin.includes(url)) {
+      c.plugin.push(url);
+      fs.writeFileSync(cfgPath, JSON.stringify(c, null, 2) + "\n");
+      console.log("added");
+    } else {
+      console.log("present");
+    }
+  ' "$TARGET" "$PLUGIN_URL" >/dev/null 2>&1; then
+    ok "cline-version-notify plugin registered: $PLUGIN_DIR/cline-version-notify.mjs"
+  else
+    warn "Could not register cline-version-notify plugin in $TARGET (non-fatal)"
+  fi
+else
+  warn "Plugin source not found: $PLUGIN_SRC (skipping)"
+fi
+
 # ─── 7. Symlink the CLI binary via `npm link` ────────────────────────────────
 # We use `npm link` from packages/cli/ instead of appending a managed
 # `export PATH=…` block to ~/.bashrc / ~/.zshrc / config.fish. npm creates

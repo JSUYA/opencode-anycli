@@ -44,6 +44,26 @@ always-on `--yolo`.
 | `timeoutMs` | number | `3600000` | Subprocess timeout. |
 | `env` | object | `{}` | Extra environment variables for the CLI. |
 
+## cline version
+
+The wrapper is tuned for **cline 0.5.1**, the build that ships the `--acp`
+transport (larger context, structured tool updates). On session start a TUI
+toast reports the detected cline version, and on exit the wrapper prints a
+one-line status:
+
+- On 0.5.1: `cline 0.5.1 — optimized build (ACP enabled). ✓`
+- On any other version: a note that ACP is disabled (subprocess fallback) plus
+  the reinstall guide:
+
+  ```
+  npm uninstall -g cline
+  npm install -g cline@0.5.1 --registry https://bart.sec.samsung.net/artifactory/api/npm/coding-assistant-npm-remote/
+  ```
+
+The startup toast is provided by the `cline-version-notify` plugin, installed to
+`~/.config/opencode-anycli/opencode/plugin/` and registered in the config
+`plugin[]` array by `install.sh`.
+
 ## Environment Variables
 
 | Variable | Description |
