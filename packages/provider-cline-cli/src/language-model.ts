@@ -442,8 +442,26 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
         // text block, no orphan empty text-start/text-end pair.
         let textBlockCounter = 0
         let activeTextBlockId: string | null = null
+        // Reasoning block: cline thoughts (ACP agent_thought_chunk) arrive as
+        // runner `reasoning-delta` events. We surface them as a V3 reasoning
+        // part, opened lazily and closed before any text/tool part so the
+        // reasoning never straddles the answer.
+        let activeReasoningBlockId: string | null = null
+        const openReasoningBlock = (): string => {
+          if (activeReasoningBlockId !== null) return activeReasoningBlockId
+          const id = "reasoning-0"
+          safeEnqueue({ type: "reasoning-start", id })
+          activeReasoningBlockId = id
+          return id
+        }
+        const closeReasoningBlock = () => {
+          if (activeReasoningBlockId === null) return
+          safeEnqueue({ type: "reasoning-end", id: activeReasoningBlockId })
+          activeReasoningBlockId = null
+        }
         const openTextBlock = (): string => {
           if (activeTextBlockId !== null) return activeTextBlockId
+          closeReasoningBlock()
           const id = `text-${textBlockCounter++}`
           safeEnqueue({ type: "text-start", id })
           activeTextBlockId = id
@@ -484,6 +502,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
               continue
             }
             trackToolCall(thisInstance.previousToolCalls, call.toolName, call.input, ClineLanguageModel.MAX_TOOL_CALL_CACHE)
+            closeReasoningBlock()
             closeTextBlock()
             safeEnqueue({
               type: "tool-call",
@@ -501,7 +520,10 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
             signal: internalAbort.signal,
           })) {
             if (streamCancelled) break
-            if (ev.type === "text-delta") {
+            if (ev.type === "reasoning-delta") {
+              const id = openReasoningBlock()
+              safeEnqueue({ type: "reasoning-delta", id, delta: ev.delta })
+            } else if (ev.type === "text-delta") {
               if (parser !== null) {
                 const out = parser.feed(ev.delta)
                 if (out.text.length > 0) {
@@ -514,6 +536,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
                 safeEnqueue({ type: "text-delta", id, delta: ev.delta })
               }
             } else if (ev.type === "tool-call") {
+              closeReasoningBlock()
               closeTextBlock()
               // Bridge a cline-side tool invocation to opencode's stream.
               // cline already ran the tool, so we surface it as
@@ -560,6 +583,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
               safeEnqueue({ type: "text-delta", id, delta: tail.text })
             }
           }
+          closeReasoningBlock()
           closeTextBlock()
           // finishReason logic:
           //   - opencode-calls extracted → "tool-calls": opencode dispatches
@@ -593,6 +617,7 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
               safeEnqueue({ type: "text-delta", id, delta: tail.text })
             }
           }
+          closeReasoningBlock()
           closeTextBlock()
           safeEnqueue({
             type: "error",
