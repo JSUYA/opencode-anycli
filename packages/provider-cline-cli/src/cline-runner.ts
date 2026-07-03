@@ -159,10 +159,22 @@ type VisibleText = {
   text: string
 }
 
-/** Build the CLI arg list for cline. */
+/**
+ * Build the CLI arg list for cline.
+ *
+ * Config isolation: cline serialises on its shared config/state under
+ * ~/.cline-sr — two concurrent cline processes sharing it hang (mutual lock,
+ * both stall at zero output). When OPENCODE_ANYCLI_CLINE_CONFIG points at an
+ * isolated settings dir we pass it through as `--config` so parallel cline
+ * sessions (e.g. omac-scheduler lanes) don't contend. Skipped if the caller
+ * already supplied an explicit `--config` in extraArgs.
+ */
 function buildClineArgs(prompt: string, model?: string, extraArgs: readonly string[] = []): string[] {
   const modelArgs = model && model !== "default" ? ["-m", model] : []
-  return ["--json", "--yolo", ...modelArgs, "--act", prompt, ...extraArgs]
+  const isolatedConfig = process.env["OPENCODE_ANYCLI_CLINE_CONFIG"]
+  const hasExplicitConfig = extraArgs.some((a) => a === "--config" || a.startsWith("--config="))
+  const configArgs = isolatedConfig && !hasExplicitConfig ? ["--config", isolatedConfig] : []
+  return ["--json", "--yolo", ...modelArgs, ...configArgs, "--act", prompt, ...extraArgs]
 }
 
 /** Buffered runner — collects all text and returns once cline exits or completes. */
