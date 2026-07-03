@@ -15,13 +15,12 @@
 // transport is in use.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { randomUUID } from "node:crypto"
 import { Readable, Writable } from "node:stream"
 import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION, type Client } from "@agentclientprotocol/sdk"
 import type * as schema from "@agentclientprotocol/sdk"
 import type { ClineUsage, RunResult } from "./types.js"
 import type { RunInput, StreamEvent } from "./cline-runner.js"
-import { CLINE_READ_TOOL_NAME } from "./cline-runner.js"
+import { bridgeAcpTool, buildAcpToolResult } from "./cline-tool-bridge.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
 
@@ -31,13 +30,15 @@ export async function runOnceAcp(input: RunInput): Promise<RunResult> {
   let parseErrors = 0
   for await (const ev of runStreamAcp(input)) {
     if (ev.type === "text-delta") finalText += ev.delta
-    else if (ev.type === "tool-call") finalText += renderToolCallMarker(ev) ?? ""
     else if (ev.type === "finish") {
       usage = ev.usage
       parseErrors = ev.parseErrors
     } else if (ev.type === "error") {
       throw ev.error
     }
+    // reasoning-delta / tool-call / tool-result are not part of the answer text:
+    // reasoning is cline's thinking, tool events are provider-executed. The
+    // doGenerate caller only parses <opencode-call> tags out of `finalText`.
   }
   return { text: finalText, usage, parseErrors }
 }
@@ -119,6 +120,11 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   // assistant accumulator and drop any chunk that is an exact duplicate
   // of (or strict prefix-restate of) what we've already streamed.
   const assistantState = { acc: "" }
+  // ACP tool_call carries `kind`+`rawInput`; the matching tool_call_update(s)
+  // carry `status`/`rawOutput` (often WITHOUT kind). Stash the resolved
+  // opencode tool name + kind by toolCallId so the terminal update can emit
+  // the tool-result even when its own payload omits the kind.
+  const pendingTools = new Map<string, { toolName: string; kind: string | undefined }>()
   let usage: ClineUsage = emptyUsage()
 
   // Build the Client implementation ACP delivers callbacks to.
@@ -136,7 +142,7 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
     },
     sessionUpdate: async ({ update }) => {
       try {
-        translateSessionUpdate(update, { enqueue, emittedReads, assistantState })
+        translateSessionUpdate(update, { enqueue, emittedReads, assistantState, pendingTools })
       } catch (err) {
         if (DEBUG) process.stderr.write(`[cline-acp] sessionUpdate error: ${String(err)}\n`)
       }
@@ -223,19 +229,22 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
 }
 
 // Translate one ACP SessionUpdate into 0..N StreamEvent's.
-function translateSessionUpdate(
+// Exported for unit testing (see cline-acp-runner-bridge.test.ts).
+export function translateSessionUpdate(
   update: schema.SessionUpdate,
   ctx: {
     enqueue: (ev: StreamEvent) => void
     emittedReads: Set<string>
     assistantState: { acc: string }
+    pendingTools: Map<string, { toolName: string; kind: string | undefined }>
   },
 ): void {
   switch (update.sessionUpdate) {
     case "agent_thought_chunk": {
-      // Thoughts are independent of the user-visible message stream.
+      // cline reasoning — route to a reasoning stream part, NOT the answer
+      // text (otherwise the thinking pollutes the visible message).
       const text = blockToText(update.content)
-      if (text) ctx.enqueue({ type: "text-delta", delta: text })
+      if (text) ctx.enqueue({ type: "reasoning-delta", delta: text })
       return
     }
     case "agent_message_chunk": {
@@ -244,12 +253,8 @@ function translateSessionUpdate(
       // incoming chunk is exactly what we've already accumulated, drop it.
       const text = blockToText(update.content)
       if (!text) return
-      if (text === ctx.assistantState.acc) {
-        // Pure restate of what we already streamed.
-        return
-      }
+      if (text === ctx.assistantState.acc) return
       if (ctx.assistantState.acc.length > 0 && text.startsWith(ctx.assistantState.acc)) {
-        // Prefix-extending restate: emit only the genuinely new tail.
         const tail = text.slice(ctx.assistantState.acc.length)
         ctx.assistantState.acc = text
         ctx.enqueue({ type: "text-delta", delta: tail })
@@ -264,34 +269,72 @@ function translateSessionUpdate(
       return
     case "tool_call":
     case "tool_call_update": {
-      // ACP tool calls map onto opencode's read tool only when the cline
-      // tool was actually a file read — that's the path that triggers
-      // LSP.touchFile in opencode. Anything else (bash, edit, search, …)
-      // is surfaced inline as cline already streams text describing it via
-      // agent_message_chunk, so we don't double-up.
-      const filePath = pickReadFilePath(update)
-      if (filePath && !ctx.emittedReads.has(filePath)) {
-        ctx.emittedReads.add(filePath)
-        const toolCallId = `cline-acp-read-${randomUUID()}`
-        ctx.enqueue({
-          type: "tool-call",
-          toolCallId,
-          toolName: CLINE_READ_TOOL_NAME,
-          input: { filePath },
-        })
-        ctx.enqueue({
-          type: "tool-result",
-          toolCallId,
-          toolName: CLINE_READ_TOOL_NAME,
-          result: { ok: true, filePath },
-        })
+      const u = update as unknown as {
+        toolCallId?: unknown
+        kind?: unknown
+        status?: unknown
+        rawInput?: unknown
+        rawOutput?: unknown
+        content?: unknown
+        title?: unknown
+      }
+      const id = typeof u.toolCallId === "string" ? u.toolCallId : null
+      if (id === null) return
+      const kind = typeof u.kind === "string" ? u.kind : undefined
+
+      // Emit the tool-call once, when we first learn the kind + input.
+      if (!ctx.pendingTools.has(id) && kind !== undefined) {
+        const bridged = bridgeAcpTool(kind, u.rawInput)
+        if (bridged === null) {
+          // Unmapped kind (fetch/think/…): opencode drops unknown tool names,
+          // so surface a text marker rather than a dangling call.
+          const title = typeof u.title === "string" ? u.title : kind
+          ctx.enqueue({ type: "text-delta", delta: `[cline:${kind}] ${title}\n` })
+          ctx.pendingTools.set(id, { toolName: "", kind })
+        } else {
+          // De-dupe reads by filePath (cline re-reads the same file).
+          if (bridged.toolName === "read") {
+            const fp = typeof bridged.input["filePath"] === "string" ? (bridged.input["filePath"] as string) : null
+            if (fp !== null) {
+              if (ctx.emittedReads.has(fp)) {
+                ctx.pendingTools.set(id, { toolName: "", kind })
+                return
+              }
+              ctx.emittedReads.add(fp)
+            }
+          }
+          ctx.pendingTools.set(id, { toolName: bridged.toolName, kind })
+          ctx.enqueue({
+            type: "tool-call",
+            toolCallId: `cline-acp-${id}`,
+            toolName: bridged.toolName,
+            input: bridged.input,
+          })
+        }
+      }
+
+      // Emit the tool-result on a terminal status.
+      const status = typeof u.status === "string" ? u.status : null
+      if (status === "completed" || status === "failed") {
+        const pend = ctx.pendingTools.get(id)
+        if (pend && pend.toolName.length > 0) {
+          const contentText = pickAcpContentText(u.content)
+          const result = buildAcpToolResult(pend.toolName, u.rawOutput, contentText, status === "completed")
+          ctx.enqueue({
+            type: "tool-result",
+            toolCallId: `cline-acp-${id}`,
+            toolName: pend.toolName,
+            result,
+            ...(status === "failed" ? { isError: true } : {}),
+          })
+          ctx.pendingTools.delete(id)
+        }
       }
       return
     }
     default:
       // plan / available_commands_update / current_mode_update /
-      // config_option_update / session_info_update — informational. Drop
-      // for now; could be surfaced later via providerMetadata if useful.
+      // config_option_update / session_info_update — informational. Drop.
       return
   }
 }
@@ -302,30 +345,23 @@ function blockToText(content: schema.ContentBlock | undefined): string {
   return ""
 }
 
-// Pull the file path out of a tool_call / tool_call_update if it represents
-// a read. cline's ACP populates `kind` with one of ToolKind ("read",
-// "edit", "execute", …); locations[].path carries the file. Falls back to
-// rawInput.filePath / .path for older cline builds.
-function pickReadFilePath(update: schema.ToolCall | schema.ToolCallUpdate): string | null {
-  const kind = (update as { kind?: unknown }).kind
-  if (kind !== "read" && kind !== undefined) return null
-  const locations = (update as { locations?: ReadonlyArray<{ path?: string }> }).locations
-  const fromLocation = locations?.find((l) => typeof l.path === "string")?.path
-  if (fromLocation) return fromLocation
-  const rawInput = (update as { rawInput?: unknown }).rawInput
-  if (rawInput && typeof rawInput === "object" && rawInput !== null) {
-    const r = rawInput as Record<string, unknown>
-    if (typeof r["filePath"] === "string") return r["filePath"] as string
-    if (typeof r["path"] === "string") return r["path"] as string
+// Best-effort text extraction from an ACP ToolCallContent[] ("content" variant
+// wraps a ContentBlock; "diff"/"terminal" carry no plain text). rawOutput is
+// the primary result source; this is only a fallback.
+function pickAcpContentText(content: unknown): string | null {
+  if (!Array.isArray(content)) return null
+  for (const item of content) {
+    if (item && typeof item === "object") {
+      const inner = (item as { content?: unknown }).content
+      if (inner && typeof inner === "object" && (inner as { type?: unknown }).type === "text") {
+        const t = (inner as { text?: unknown }).text
+        if (typeof t === "string" && t.length > 0) return t
+      }
+      const direct = (item as { text?: unknown }).text
+      if (typeof direct === "string" && direct.length > 0) return direct
+    }
   }
   return null
-}
-
-function renderToolCallMarker(ev: { toolName: string; input: Record<string, unknown> }): string | null {
-  if (ev.toolName !== CLINE_READ_TOOL_NAME) return null
-  const filePath = typeof ev.input["filePath"] === "string" ? (ev.input["filePath"] as string) : null
-  if (!filePath) return null
-  return `[cline-acp:read] ${filePath}\n`
 }
 
 function emptyUsage(): ClineUsage {
