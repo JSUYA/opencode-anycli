@@ -598,3 +598,203 @@ export function translateSessionUpdate(
       if (ctx.assistantState.acc.length > 0 && text.startsWith(ctx.assistantState.acc)) {
         const tail = text.slice(ctx.assistantState.acc.length)
         ctx.assistantState.acc = text
+        ctx.enqueue({ type: "text-delta", delta: tail })
+        return
+      }
+      ctx.assistantState.acc += text
+      ctx.enqueue({ type: "text-delta", delta: text })
+      return
+    }
+    case "user_message_chunk":
+      return
+    case "tool_call":
+    case "tool_call_update": {
+      const u = update as unknown as {
+        toolCallId?: unknown
+        kind?: unknown
+        status?: unknown
+        rawInput?: unknown
+        rawOutput?: unknown
+        content?: unknown
+        title?: unknown
+      }
+      const id = typeof u.toolCallId === "string" ? u.toolCallId : null
+      if (id === null) return
+      const kind = typeof u.kind === "string" ? u.kind : undefined
+
+      // Emit the tool-call once, when we first learn the kind + input.
+      if (!ctx.pendingTools.has(id) && kind !== undefined) {
+        const bridged = bridgeAcpTool(kind, u.rawInput)
+        if (bridged === null) {
+          // Unmapped kind — opencode drops unknown tool names; surface text.
+          const title = typeof u.title === "string" ? u.title : kind
+          ctx.enqueue({ type: "text-delta", delta: `[cline:${kind}] ${title}\n` })
+          ctx.pendingTools.set(id, { toolName: "", kind })
+        } else {
+          // De-dupe reads by filePath (cline re-reads the same file).
+          if (bridged.toolName === "read") {
+            const fp = typeof bridged.input["filePath"] === "string" ? (bridged.input["filePath"] as string) : null
+            if (fp !== null) {
+              if (ctx.emittedReads.has(fp)) {
+                ctx.pendingTools.set(id, { toolName: "", kind })
+                return
+              }
+              ctx.emittedReads.add(fp)
+            }
+          }
+          ctx.pendingTools.set(id, { toolName: bridged.toolName, kind })
+          ctx.enqueue({
+            type: "tool-call",
+            toolCallId: `cline-acp-${id}`,
+            toolName: bridged.toolName,
+            input: bridged.input,
+          })
+        }
+      }
+
+      // Emit the tool-result on a terminal status.
+      const status = typeof u.status === "string" ? u.status : null
+      if (status === "completed" || status === "failed") {
+        const pend = ctx.pendingTools.get(id)
+        if (pend && pend.toolName.length > 0) {
+          const contentText = blockToText((u.content as { type?: string } | undefined) as schema.ContentBlock | undefined)
+          const result = buildAcpToolResult(pend.toolName, u.rawOutput, contentText || null, status === "completed")
+          ctx.enqueue({
+            type: "tool-result",
+            toolCallId: `cline-acp-${id}`,
+            toolName: pend.toolName,
+            result,
+            ...(status === "failed" ? { isError: true } : {}),
+          })
+          ctx.pendingTools.delete(id)
+        }
+      }
+      return
+    }
+    default:
+      return
+  }
+}
+```
+
+> Note: `update.content` for `tool_call_update` is a `ToolCallContent[]`; `blockToText` expects a single `ContentBlock`. For the result body we only need a text hint — pass `u.content` through `blockToText` guarded (it returns `""` for non-text), so array content simply yields `""` and we fall back to `rawOutput`. Keep `blockToText` as-is.
+
+(d) `runOnceAcp` — drop reasoning from the accumulated text (thoughts are not the answer):
+
+```ts
+export async function runOnceAcp(input: RunInput): Promise<RunResult> {
+  let finalText = ""
+  let usage = emptyUsage()
+  let parseErrors = 0
+  for await (const ev of runStreamAcp(input)) {
+    if (ev.type === "text-delta") finalText += ev.delta
+    else if (ev.type === "reasoning-delta") {
+      /* reasoning is not part of the answer text */
+    } else if (ev.type === "tool-call") finalText += renderToolCallMarker(ev) ?? ""
+    else if (ev.type === "finish") {
+      usage = ev.usage
+      parseErrors = ev.parseErrors
+    } else if (ev.type === "error") {
+      throw ev.error
+    }
+  }
+  return { text: finalText, usage, parseErrors }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run cline-acp-runner-bridge` then `../../node_modules/.bin/tsc --noEmit`
+Expected: PASS (7 tests); typecheck clean. If `pickReadFilePath` / `renderToolCallMarker` become unused-symbol errors, remove `pickReadFilePath` (unused) and keep `renderToolCallMarker` (still used by `runOnceAcp`).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/cline-acp-runner.ts test/cline-acp-runner-bridge.test.ts
+git commit -m "feat(provider): ACP runner full tool bridging + thought reasoning"
+```
+
+---
+
+### Task 5: `doStream` renders `reasoning-delta`; `runStreamAcp` reasoning path
+
+**Files:**
+- Modify: `src/language-model.ts` (`doStream` cline branch, ~lines 407-612)
+- Test: `test/language-model-reasoning.test.ts` (create)
+
+**Interfaces:**
+- Consumes: `StreamEvent` reasoning-delta (Task 3), ACP runner emitting it (Task 4).
+- Produces: `doStream` emits V3 `reasoning-start` / `reasoning-delta` / `reasoning-end` parts for runner `reasoning-delta` events, opening lazily and closing before any text/tool part.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/language-model-reasoning.test.ts`. Use `vi.mock` (hoisted ESM module replacement — the reliable way to intercept a named import the SUT calls directly; `vi.spyOn` on an ESM namespace does NOT affect an already-bound named import in vitest). Mock `runStreamAcp` to yield a scripted event sequence, construct the model in explicit `mode:"acp"` (so no probe runs), and read the V3 stream parts:
+
+```ts
+import { describe, it, expect, vi } from "vitest"
+
+vi.mock("../src/cline-acp-runner.js", async (orig) => {
+  const actual = await (orig() as Promise<Record<string, unknown>>)
+  return { ...actual, runStreamAcp: vi.fn() }
+})
+
+import { runStreamAcp } from "../src/cline-acp-runner.js"
+import { ClineLanguageModel } from "../src/language-model.js"
+
+async function collectParts(model: ClineLanguageModel) {
+  const { stream } = await model.doStream({
+    prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  } as any)
+  const parts: any[] = []
+  const reader = stream.getReader()
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    parts.push(value)
+  }
+  return parts
+}
+
+describe("doStream reasoning parts (ACP)", () => {
+  it("emits reasoning-start/delta/end before text", async () => {
+    ;(runStreamAcp as unknown as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
+      yield { type: "reasoning-delta", delta: "think " }
+      yield { type: "reasoning-delta", delta: "more" }
+      yield { type: "text-delta", delta: "ANSWER" }
+      yield { type: "finish", usage: { inputTokens: 1, outputTokens: 1, cacheWriteTokens: 0, cacheReadTokens: 0, totalTokens: 2, totalCost: undefined }, parseErrors: 0 }
+    })
+    const model = new ClineLanguageModel("GaussO4.1-CLI", { cli: "cline", mode: "acp" })
+    const parts = await collectParts(model)
+    const types = parts.map((p) => p.type)
+    expect(types).toContain("reasoning-start")
+    expect(types).toContain("reasoning-delta")
+    expect(types).toContain("reasoning-end")
+    // reasoning-end precedes the first text-start
+    expect(types.indexOf("reasoning-end")).toBeLessThan(types.indexOf("text-start"))
+    const rtext = parts.filter((p) => p.type === "reasoning-delta").map((p) => p.delta).join("")
+    expect(rtext).toBe("think more")
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run language-model-reasoning`
+Expected: FAIL — no reasoning parts emitted (reasoning-delta currently unhandled → falls through / dropped).
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/language-model.ts` `doStream`, inside the `start(controller)` body, add a lazy reasoning block alongside the existing text block helpers (after `closeTextBlock` is defined, ~line 456):
+
+```ts
+        let activeReasoningBlockId: string | null = null
+        const openReasoningBlock = (): string => {
+          if (activeReasoningBlockId !== null) return activeReasoningBlockId
+          const id = "reasoning-0"
+          safeEnqueue({ type: "reasoning-start", id })
+          activeReasoningBlockId = id
+          return id
+        }
+        const closeReasoningBlock = () => {
+          if (activeReasoningBlockId === null) return
+          safeEnqueue({ type: "reasoning-end", id: activeReasoningBlockId })
