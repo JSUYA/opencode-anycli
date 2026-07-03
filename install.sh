@@ -543,14 +543,33 @@ else
     step "Building workspaces"
   fi
   cd "$REPO_DIR"
+  # Build each workspace package DIRECTLY. We deliberately avoid the root
+  # `npm run build --workspaces` aggregator here: under bun, `bun run build`
+  # rewrites the script's inner `npm run build` to `bun run build` and
+  # ignores `--workspaces` for `run`, so it re-invokes the ROOT "build"
+  # script and re-appends `--workspaces --if-present` on every pass —
+  # recursing forever ("$ bun run build --workspaces --if-present …" growing
+  # without bound). Running each package's own `build` (tsup) sidesteps the
+  # aggregator entirely and behaves identically under bun and npm.
+  BUILD_PKGS=(
+    "$REPO_DIR/packages/provider-cline-cli"
+    "$REPO_DIR/packages/cli"
+    "$REPO_DIR/packages/tui-plugin-exit-confirm"
+  )
   if command -v bun >/dev/null 2>&1; then
-    info "bun found; using bun install + build"
+    info "bun found; using bun install + per-package build"
     bun install
-    bun run build
+    for pkg in "${BUILD_PKGS[@]}"; do
+      info "building $(basename "$pkg")"
+      ( cd "$pkg" && bun run build )
+    done
   else
     info "Using npm because bun is unavailable"
     npm install --workspaces --include-workspace-root
-    npm run build --workspaces --if-present
+    for pkg in "${BUILD_PKGS[@]}"; do
+      info "building $(basename "$pkg")"
+      ( cd "$pkg" && npm run build )
+    done
   fi
   ok "Build complete"
 fi
