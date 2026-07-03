@@ -15,7 +15,7 @@
 // transport is in use.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { readdirSync, statSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { Readable, Writable, Transform } from "node:stream"
 import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION, type Client } from "@agentclientprotocol/sdk"
@@ -54,6 +54,59 @@ function jsonLinesOnly(): Transform {
       cb(null, keep(buf) ? Buffer.from(buf, "utf8") : undefined)
     },
   })
+}
+
+/**
+ * Parse /proc/<pid>/stat → { ppid, state, cpu (utime+stime jiffies) }, or null
+ * if the process is gone (or /proc is unavailable). The comm field (2) may
+ * contain spaces/parens, so we split after its closing paren.
+ */
+export function readProcStat(pid: number): { ppid: number; state: string; cpu: number } | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    const rp = stat.lastIndexOf(")")
+    if (rp < 0) return null
+    const f = stat.slice(rp + 2).trim().split(/\s+/) // f[0]=state(3) f[1]=ppid(4) f[11]=utime(14) f[12]=stime(15)
+    return { state: f[0] ?? "?", ppid: Number(f[1]) || 0, cpu: (Number(f[11]) || 0) + (Number(f[12]) || 0) }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * CPU jiffies summed over the process subtree rooted at `root`, plus liveness.
+ * `alive:false` → root process is gone; `cpu:NaN` → /proc unreadable (can't
+ * probe, caller should keep waiting). Summing the whole subtree means a cline
+ * that is merely blocked on a long child command (which is itself burning CPU)
+ * still shows progress and is NOT mistaken for a deadlock.
+ */
+export function subtreeCpu(root: number): { alive: boolean; zombie: boolean; cpu: number } {
+  let names: string[]
+  try {
+    names = readdirSync("/proc")
+  } catch {
+    return { alive: true, zombie: false, cpu: NaN }
+  }
+  const info = new Map<number, { ppid: number; state: string; cpu: number }>()
+  for (const n of names) {
+    if (!/^\d+$/.test(n)) continue
+    const rec = readProcStat(Number(n))
+    if (rec) info.set(Number(n), rec)
+  }
+  const rootRec = info.get(root)
+  if (!rootRec) return { alive: false, zombie: false, cpu: 0 }
+  let cpu = 0
+  const stack = [root]
+  const seen = new Set<number>()
+  while (stack.length > 0) {
+    const p = stack.pop()!
+    if (seen.has(p)) continue
+    seen.add(p)
+    const rec = info.get(p)
+    if (rec) cpu += rec.cpu
+    for (const [pid, r] of info) if (r.ppid === p) stack.push(pid)
+  }
+  return { alive: true, zombie: rootRec.state === "Z", cpu }
 }
 
 export async function runOnceAcp(input: RunInput): Promise<RunResult> {
@@ -127,11 +180,75 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
 
   // Track exit cause so we can surface a real error in `close` instead of
   // silently emitting a finish event.
-  // Timeout disabled — ACP mode runs without time limit for large prompt support.
-  let killReason: "abort" | "client-error" | null = null
+  let killReason: "abort" | "client-error" | "idle-timeout" | null = null
+
+  // Health watchdog. ACP has no TOTAL time limit (large prompts / long
+  // inference must run to completion), but a stalled or deadlocked cline —
+  // e.g. several subagents contending on the shared ~/.cline-sr state — streams
+  // NOTHING and would otherwise hang forever: the turn never ends, so
+  // opencode's `task` tool never resolves and the orchestrator waits on the
+  // subagent indefinitely.
+  //
+  // We do NOT kill on elapsed time alone. A silent period only TRIGGERS a
+  // health check: we sample the cline process tree's CPU usage over a short
+  // window and terminate only when the state is unrecoverable — the process is
+  // gone, defunct (zombie), or making zero progress (deadlocked). A cline that
+  // is genuinely working (inferring, or blocked on a long child command that is
+  // itself burning CPU) keeps advancing and is left alone.
+  const idleMs = (() => {
+    const raw = Number(process.env["OPENCODE_ANYCLI_ACP_IDLE_MS"])
+    return Number.isFinite(raw) && raw > 0 ? raw : 90_000
+  })()
+  const probeMs = 3_000
+  let idleTimer: ReturnType<typeof setTimeout> | null = null
+  let probeTimer: ReturnType<typeof setTimeout> | null = null
+  function clearIdle() {
+    if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null }
+    if (probeTimer !== null) { clearTimeout(probeTimer); probeTimer = null }
+  }
+  const terminateHung = (reason: string) => {
+    if (done) return
+    killReason = "idle-timeout"
+    forwardDiag = false
+    exitErr = new Error(
+      `cline --acp ${reason}; aborting the turn so the caller (and any parent task) isn't blocked forever. ` +
+        `Tune the silence window with OPENCODE_ANYCLI_ACP_IDLE_MS.`,
+    )
+    if (DEBUG) process.stderr.write(`[cline-acp] ${reason} — killing pid ${child.pid}\n`)
+    try { child.kill("SIGKILL") } catch { /* ignore */ }
+    enqueue({ type: "error", error: exitErr })
+    finish()
+  }
+  function armIdle() {
+    if (done) return
+    const pid = child.pid
+    if (pid === undefined) return // no pid to watch
+    clearIdle()
+    idleTimer = setTimeout(() => {
+      if (done) return
+      const before = subtreeCpu(pid)
+      if (!before.alive) return terminateHung("process exited without a terminal event")
+      if (before.zombie) return terminateHung("process is defunct (zombie)")
+      if (Number.isNaN(before.cpu)) return armIdle() // can't probe (no /proc) — keep waiting
+      // Silent for idleMs. Sample CPU again after a short window: terminate only
+      // if the tree is gone/defunct or made no progress (deadlocked).
+      probeTimer = setTimeout(() => {
+        if (done) return
+        const after = subtreeCpu(pid)
+        if (!after.alive) return terminateHung("process exited without a terminal event")
+        if (after.zombie || (!Number.isNaN(after.cpu) && after.cpu <= before.cpu)) {
+          return terminateHung(`stalled with no output for ${Math.round(idleMs / 1000)}s and no CPU progress (deadlocked)`)
+        }
+        armIdle() // still making progress — leave it running
+      }, probeMs)
+      if (typeof probeTimer.unref === "function") probeTimer.unref()
+    }, idleMs)
+    if (typeof idleTimer.unref === "function") idleTimer.unref()
+  }
 
   const onAbort = () => {
     killReason = "abort"
+    clearIdle()
     // Stop forwarding cline's stderr: aborting mid-turn is exactly when it
     // emits the SIGTERM banner + EPIPE crash-dumps we want to hide.
     forwardDiag = false
@@ -147,6 +264,7 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   let exitErr: Error | null = null
   function enqueue(ev: StreamEvent) {
     queue.push(ev)
+    armIdle() // any real ACP activity resets the silence window
     if (resolveNext) {
       const r = resolveNext
       resolveNext = null
@@ -155,6 +273,7 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   }
   function finish() {
     done = true
+    clearIdle()
     if (resolveNext) {
       const r = resolveNext
       resolveNext = null
@@ -223,6 +342,10 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   }
 
   const connection = new ClientSideConnection(() => clientImpl, stream)
+
+  // Arm the health watchdog now: cline could stall during initialize/newSession
+  // (before any event), and enqueue() re-arms it on every subsequent event.
+  armIdle()
 
   // Run the prompt turn. ACP delivers session updates via `clientImpl.sessionUpdate`
   // as the agent works; the `prompt(...)` call resolves with a `stopReason`
