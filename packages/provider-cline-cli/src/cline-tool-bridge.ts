@@ -423,6 +423,87 @@ function flattenRecord(rec: Record<string, unknown>): Record<string, unknown> {
   return out
 }
 
+// ─── ACP (Agent Client Protocol) tool bridging ───────────────────────────────
+//
+// cline --acp emits tool activity as ACP `tool_call` / `tool_call_update`
+// session updates carrying `kind` (ToolKind), `rawInput` (cline's native
+// args), `rawOutput`, `content`, and `status`. `bridgeAcpTool` maps the
+// call to an opencode tool-call input; `buildAcpToolResult` shapes the
+// result body once a terminal status arrives.
+
+/** Map an ACP tool-call (kind + rawInput) to an opencode tool-call, or null. */
+export function bridgeAcpTool(
+  kind: string | undefined,
+  rawInput: unknown,
+): { toolName: string; input: Record<string, unknown> } | null {
+  const inRec = isObject(rawInput) ? rawInput : {}
+  switch (kind) {
+    case "read": {
+      const filePath = pickString(inRec["path"]) ?? pickString(inRec["filePath"])
+      if (filePath === null) return null
+      return { toolName: "read", input: { filePath } }
+    }
+    case "execute": {
+      const command = pickString(inRec["command"]) ?? pickString(inRec["cmd"])
+      if (command === null) return null
+      return { toolName: "bash", input: { command } }
+    }
+    case "edit": {
+      const filePath = pickString(inRec["path"]) ?? pickString(inRec["filePath"])
+      if (filePath === null) return null
+      const newText = pickString(inRec["new_text"]) ?? pickString(inRec["content"]) ?? pickString(inRec["newText"])
+      const oldText = pickString(inRec["old_text"]) ?? pickString(inRec["oldText"])
+      const diff = pickString(inRec["diff"])
+      if (oldText !== null || diff !== null) {
+        const input: Record<string, unknown> = { filePath }
+        if (oldText !== null) input["oldString"] = oldText
+        if (newText !== null) input["newString"] = newText
+        if (diff !== null) input["diff"] = diff
+        return { toolName: "edit", input }
+      }
+      const input: Record<string, unknown> = { filePath }
+      if (newText !== null) input["content"] = newText
+      return { toolName: "write", input }
+    }
+    case "search": {
+      const pattern = pickString(inRec["regex"]) ?? pickString(inRec["query"]) ?? pickString(inRec["pattern"])
+      if (pattern === null) return null
+      const input: Record<string, unknown> = { pattern }
+      const path = pickString(inRec["path"])
+      if (path !== null) input["path"] = path
+      return { toolName: "grep", input }
+    }
+    default:
+      return null
+  }
+}
+
+/** Build the opencode tool-result body for a terminal ACP tool-call. */
+export function buildAcpToolResult(
+  toolName: string,
+  rawOutput: unknown,
+  contentText: string | null,
+  ok: boolean,
+): Record<string, unknown> {
+  const text = pickAcpOutputText(rawOutput, contentText)
+  const result: Record<string, unknown> = { ok }
+  if (text !== null) result[toolName === "bash" ? "stdout" : "output"] = text
+  return result
+}
+
+function pickAcpOutputText(rawOutput: unknown, contentText: string | null): string | null {
+  if (typeof rawOutput === "string" && rawOutput.length > 0) return rawOutput
+  if (isObject(rawOutput)) {
+    const t =
+      pickString(rawOutput["result"]) ??
+      pickString(rawOutput["output"]) ??
+      pickString(rawOutput["stdout"]) ??
+      pickString(rawOutput["content"])
+    if (t !== null) return t
+  }
+  return contentText
+}
+
 // ─── Per-tool transforms ─────────────────────────────────────────────────────
 
 type Transform = (raw: ClineToolPayload, originalName: string) => BridgedToolEvent
