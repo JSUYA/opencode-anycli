@@ -998,3 +998,203 @@ with:
 
 - [ ] **Step 4: Run test to verify it passes**
 
+Run: `pnpm vitest run language-model-automode` then `pnpm vitest run` (full suite) and `../../node_modules/.bin/tsc --noEmit`
+Expected: PASS; full suite green; typecheck clean. (The mocked `runStreamAcp` in Task 5's test still works since both spy on the same export.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/language-model.ts test/language-model-automode.test.ts
+git commit -m "feat(provider): resolve mode:auto via --acp capability probe"
+```
+
+---
+
+### Task 7: ACP usage recovery from persisted task files
+
+**Files:**
+- Modify: `src/cline-runner.ts` (export `readPersistedTaskUsage`)
+- Modify: `src/cline-acp-runner.ts` (resolve cline task id for the ACP session, read usage, attach to `finish`)
+- Test: `test/cline-acp-usage.test.ts` (create)
+
+**Interfaces:**
+- Consumes: `readPersistedTaskUsage(taskId, options)` (now exported).
+- Produces: `runStreamAcp` `finish` event carries recovered `usage` when a matching cline task dir is found; otherwise `emptyUsage()` (unchanged).
+- New helper `latestClineTaskId(options): string | null` in `cline-acp-runner.ts` — newest dir under `<dataDir>/tasks` modified during the run.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/cline-acp-usage.test.ts`:
+
+```ts
+import { describe, it, expect } from "vitest"
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { readPersistedTaskUsage } from "../src/cline-runner.js"
+
+describe("readPersistedTaskUsage is exported and reads ui_messages", () => {
+  it("returns tokens from a task's ui_messages.json", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "acp-usage-"))
+    const taskId = "conv_123"
+    const taskDir = join(dataDir, "tasks", taskId)
+    mkdirSync(taskDir, { recursive: true })
+    writeFileSync(
+      join(taskDir, "ui_messages.json"),
+      JSON.stringify([
+        { type: "say", say: "api_req_started", ts: 1, text: JSON.stringify({ tokensIn: 100, tokensOut: 20 }) },
+      ]),
+    )
+    const usage = readPersistedTaskUsage(taskId, { command: "cline", timeoutMs: 0, env: { HOME: dataDir.replace(/\/\.cline.*$/, "") } } as any)
+    // We pass an explicit config dir via extraArgs instead:
+    const usage2 = readPersistedTaskUsage(taskId, { command: "cline", timeoutMs: 0, extraArgs: ["--config", dataDir] } as any)
+    expect(usage2?.inputTokens).toBe(100)
+    expect(usage2?.outputTokens).toBe(20)
+    void usage
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm vitest run cline-acp-usage`
+Expected: FAIL — `readPersistedTaskUsage` is not exported.
+
+- [ ] **Step 3: Write minimal implementation**
+
+(a) In `src/cline-runner.ts`, add `export` to `readPersistedTaskUsage` and `clineDataDir`:
+
+```ts
+export function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): ClineUsage | null {
+```
+```ts
+export function clineDataDir(options: RunInput["options"]): string {
+```
+
+(b) In `src/cline-acp-runner.ts`, import them and `readdirSync`/`statSync`:
+
+```ts
+import { readdirSync, statSync } from "node:fs"
+import { join } from "node:path"
+import { readPersistedTaskUsage, clineDataDir } from "./cline-runner.js"
+```
+
+Add a helper and record the run start time; after the prompt turn completes, before the `finish` is enqueued in the `close` handler, recover usage:
+
+```ts
+function latestClineTaskId(options: RunInput["options"], sinceMs: number): string | null {
+  const tasksDir = join(clineDataDir(options), "tasks")
+  let best: { id: string; mtime: number } | null = null
+  let entries: string[]
+  try {
+    entries = readdirSync(tasksDir)
+  } catch {
+    return null
+  }
+  for (const id of entries) {
+    try {
+      const st = statSync(join(tasksDir, id))
+      if (!st.isDirectory()) continue
+      const mtime = st.mtimeMs
+      if (mtime >= sinceMs && (best === null || mtime > best.mtime)) best = { id, mtime }
+    } catch {
+      /* ignore */
+    }
+  }
+  return best?.id ?? null
+}
+```
+
+In `runStreamAcpInternal`, capture a start timestamp near the top (Date is available in this module — it's a runner, not a workflow script):
+
+```ts
+  const runStartMs = Date.now() - 1000 // small skew guard
+```
+
+Then in the `child.on("close", ...)` handler, where it currently does:
+
+```ts
+    } else if (exitErr === null) {
+      enqueue({ type: "finish", usage, parseErrors: 0 })
+    }
+```
+replace with:
+
+```ts
+    } else if (exitErr === null) {
+      const taskId = latestClineTaskId(options, runStartMs)
+      const recovered = taskId !== null ? readPersistedTaskUsage(taskId, options) : null
+      enqueue({ type: "finish", usage: recovered ?? usage, parseErrors: 0 })
+    }
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm vitest run cline-acp-usage` then `../../node_modules/.bin/tsc --noEmit`
+Expected: PASS; typecheck clean.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/cline-runner.ts src/cline-acp-runner.ts test/cline-acp-usage.test.ts
+git commit -m "feat(provider): recover ACP usage from persisted cline task files"
+```
+
+---
+
+### Task 8: Config default `auto` + install migration + docs
+
+**Files:**
+- Modify: `templates/opencode.json` (repo root)
+- Modify: `install.sh` (repo root — add mode migration to both the `jq` and node fallback merge blocks)
+- Modify: `docs/provider-modes.md`
+- Test: manual (config/install are shell/JSON; no unit harness)
+
+**Interfaces:** none (configuration + docs).
+
+- [ ] **Step 1: Update the template**
+
+In `templates/opencode.json`, change the cline provider options:
+
+```json
+      "options": {
+        "cli": "cline",
+        "mode": "auto"
+      }
+```
+
+- [ ] **Step 2: Add install.sh migration**
+
+In `install.sh`, in the `jq` migration program (near `migrate_legacy_cline_models`), add a rule that rewrites a cline options.mode of `"subprocess"` to `"auto"` (only that exact old default):
+
+```jq
+| (if (.provider.cline.options.mode? // "") == "subprocess"
+     then .provider.cline.options.mode = "auto" else . end)
+```
+
+And in the node fallback merge block (the `out.provider?.cline` section), add:
+
+```js
+if (out.provider && out.provider.cline && out.provider.cline.options && out.provider.cline.options.mode === "subprocess") {
+  out.provider.cline.options.mode = "auto";
+}
+```
+
+- [ ] **Step 3: Update docs**
+
+In `docs/provider-modes.md`, add an "Auto (default)" section before "Subprocess" and correct the ACP note to be version-scoped:
+
+```markdown
+## Auto (default)
+
+`mode: "auto"` (the shipped default) probes `cline --help` once per process and
+selects the transport: **ACP** when the binary advertises `--acp` (cline-sr
+0.5.1), otherwise **subprocess** (cline-sr 0.6.0 removed the flag). No manual
+config or reinstall is needed when cline is upgraded/downgraded. Set `mode`
+explicitly to `"acp"` or `"subprocess"` to bypass detection.
+```
+
+Replace the earlier "ACP is NOT available in the Samsung cline-sr build (0.6.0)" warning with:
+
+```markdown
+> **Version note:** ACP requires a cline-sr build that ships `--acp` (0.5.1 does;
