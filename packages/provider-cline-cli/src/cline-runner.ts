@@ -1073,7 +1073,7 @@ function pickTaskId(ev: ClineEvent): string | null {
   return typeof taskId === "string" && taskId.length > 0 ? taskId : null
 }
 
-function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): ClineUsage | null {
+export function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): ClineUsage | null {
   const dataDir = clineDataDir(options)
   const taskDir = join(dataDir, "tasks", taskId)
 
@@ -1160,7 +1160,7 @@ function readPersistedTaskUsage(taskId: string, options: RunInput["options"]): C
   return null
 }
 
-function clineDataDir(options: RunInput["options"]): string {
+export function clineDataDir(options: RunInput["options"]): string {
   const args = options.extraArgs ?? []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
@@ -1169,6 +1169,11 @@ function clineDataDir(options: RunInput["options"]): string {
     if (arg?.startsWith("--config=")) return join(arg.slice("--config=".length), "data")
   }
   const home = options.env?.["HOME"] ?? process.env["HOME"] ?? homedir()
+  // The installed CLI is Samsung cline-sr, which stores state under
+  // ~/.cline-sr; vanilla cline uses ~/.cline. Prefer cline-sr when present so
+  // persisted-usage recovery (subprocess fallback + ACP) finds the real dir.
+  const srData = join(home, ".cline-sr", "data")
+  if (existsSync(srData)) return srData
   return join(home, ".cline", "data")
 }
 

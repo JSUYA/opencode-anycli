@@ -15,11 +15,14 @@
 // transport is in use.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { readdirSync, statSync } from "node:fs"
+import { join } from "node:path"
 import { Readable, Writable } from "node:stream"
 import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION, type Client } from "@agentclientprotocol/sdk"
 import type * as schema from "@agentclientprotocol/sdk"
 import type { ClineUsage, RunResult } from "./types.js"
 import type { RunInput, StreamEvent } from "./cline-runner.js"
+import { clineDataDir, readPersistedTaskUsage } from "./cline-runner.js"
 import { bridgeAcpTool, buildAcpToolResult } from "./cline-tool-bridge.js"
 
 const DEBUG = process.env["DEBUG"] === "1"
@@ -51,6 +54,11 @@ export function runStreamAcp(input: RunInput): AsyncIterable<StreamEvent> {
 
 async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEvent, void, void> {
   const { options, signal } = input
+
+  // Marker for usage recovery: cline (as of 0.5.1) does not report token usage
+  // over ACP, so on a clean finish we recover it from the newest cline task
+  // dir touched during THIS run. -1000ms guards against clock skew.
+  const runStartMs = Date.now() - 1000
 
   const args = ["--acp", ...(options.extraArgs ?? [])]
   const env = { ...process.env, ...(options.env ?? {}) }
@@ -206,7 +214,9 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
     } else if (exitErr === null && code === null && sigterm) {
       exitErr = new Error(`cline --acp terminated by signal ${sigterm}`)
     } else if (exitErr === null) {
-      enqueue({ type: "finish", usage, parseErrors: 0 })
+      const taskId = latestClineTaskId(options, runStartMs)
+      const recovered = taskId !== null ? readPersistedTaskUsage(taskId, options) : null
+      enqueue({ type: "finish", usage: recovered ?? usage, parseErrors: 0 })
     }
     finish()
   })
@@ -362,6 +372,35 @@ function pickAcpContentText(content: unknown): string | null {
     }
   }
   return null
+}
+
+/**
+ * Find the cline task id whose dir was (re)written during this ACP run. cline
+ * writes each turn's state to <dataDir>/tasks/<id>/; an ACP prompt maps to one
+ * task, so the newest dir touched at/after `sinceMs` is this session's. Parallel
+ * cline lanes use isolated --config dirs (OPENCODE_ANYCLI_CLINE_CONFIG), so they
+ * don't collide within a single dataDir. Returns null if none / on error.
+ */
+function latestClineTaskId(options: RunInput["options"], sinceMs: number): string | null {
+  const tasksDir = join(clineDataDir(options), "tasks")
+  let best: { id: string; mtime: number } | null = null
+  let entries: string[]
+  try {
+    entries = readdirSync(tasksDir)
+  } catch {
+    return null
+  }
+  for (const id of entries) {
+    try {
+      const st = statSync(join(tasksDir, id))
+      if (!st.isDirectory()) continue
+      const mtime = st.mtimeMs
+      if (mtime >= sinceMs && (best === null || mtime > best.mtime)) best = { id, mtime }
+    } catch {
+      /* ignore unreadable entry */
+    }
+  }
+  return best?.id ?? null
 }
 
 function emptyUsage(): ClineUsage {
