@@ -19,8 +19,12 @@
  *
  *  - "passthrough" (planned) — bypass cline entirely and call the model
  *    directly using cline's stored credentials. NOT YET IMPLEMENTED.
+ *
+ *  - "auto" (recommended default) — probe `cline --help` once and use "acp"
+ *    when the binary advertises `--acp` (cline-sr 0.5.1), else "subprocess"
+ *    (cline-sr 0.6.0 removed the flag). See cline-capabilities.ts.
  */
-export type ClineMode = "subprocess" | "acp" | "passthrough"
+export type ClineMode = "auto" | "subprocess" | "acp" | "passthrough"
 
 /**
  * Which locally-installed CLI this provider drives.

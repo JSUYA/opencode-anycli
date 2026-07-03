@@ -126,6 +126,7 @@ export interface RunInput {
 
 export type StreamEvent =
   | { type: "text-delta"; delta: string }
+  | { type: "reasoning-delta"; delta: string }
   | {
       type: "tool-call"
       toolCallId: string
