@@ -1198,3 +1198,103 @@ Replace the earlier "ACP is NOT available in the Samsung cline-sr build (0.6.0)"
 
 ```markdown
 > **Version note:** ACP requires a cline-sr build that ships `--acp` (0.5.1 does;
+> 0.6.0 removed it). With `mode:"auto"` the provider detects this automatically —
+> 0.5.1 uses ACP, 0.6.0 falls back to subprocess. Only force `mode:"acp"` on a
+> build you know supports it.
+```
+
+- [ ] **Step 4: Verify config parses**
+
+Run:
+```bash
+node -e "JSON.parse(require('fs').readFileSync('templates/opencode.json','utf8')); console.log('template OK')"
+bash -n install.sh && echo "install.sh syntax OK"
+```
+Expected: `template OK` and `install.sh syntax OK`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add templates/opencode.json install.sh docs/provider-modes.md
+git commit -m "feat: default cline mode to auto (version-based ACP/subprocess)"
+```
+
+---
+
+### Task 9: Build, full suite, live end-to-end verification
+
+**Files:** none (verification only).
+
+- [ ] **Step 1: Full test suite + typecheck**
+
+Run (from `packages/provider-cline-cli`):
+```bash
+pnpm vitest run
+../../node_modules/.bin/tsc --noEmit
+```
+Expected: all tests PASS; typecheck clean.
+
+- [ ] **Step 2: Rebuild dist**
+
+Run:
+```bash
+../../node_modules/.bin/tsup
+grep -c "bridgeAcpTool\|detectAcpSupport\|reasoning-delta" dist/index.js
+```
+Expected: build success; grep count ≥ 1.
+
+- [ ] **Step 3: Live ACP tool bridging (cline 0.5.1)**
+
+Create a probe dir and run the provider ACP runner against live cline (only meaningful on a 0.5.1 install):
+```bash
+SP=$(mktemp -d); printf 'SECRET=zebra99\n' > "$SP/p.txt"
+node --input-type=module -e '
+import { runStreamAcp } from "/home/junsu/dev/os/opencode-anycli/packages/provider-cline-cli/dist/index.js"
+for await (const e of runStreamAcp({prompt:"Read p.txt then run: echo OK. Report SECRET.",options:{command:"cline",timeoutMs:0,model:"GaussO4.1-CLI",cwd:process.env.SP}})){
+  if(e.type==="tool-call")console.log("CALL",e.toolName,JSON.stringify(e.input).slice(0,60))
+  else if(e.type==="tool-result")console.log("RESULT",e.toolName,"ok="+!e.isError)
+  else if(e.type==="reasoning-delta")process.stdout.write("")
+}' SP="$SP"
+```
+Expected: at least a `read` and a `bash` CALL + RESULT (proves ACP parity). Uses ~1-2 backend calls (slow; allow ~200s).
+
+- [ ] **Step 4: Live opencode headless (auto mode picks ACP on 0.5.1)**
+
+```bash
+SP=$(mktemp -d); printf 'SECRET=palindrome42\n' > "$SP/probe.txt"
+timeout 260 opencode-anycli --no-tty run --format json --dir "$SP" \
+  "Use read on probe.txt then bash: echo TOOLCALL_OK. Report SECRET." </dev/null > "$SP/ev.json" 2>/dev/null
+node -e '
+for(const l of require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n")){
+  let e; try{e=JSON.parse(l)}catch{continue}; const p=e.part||{}
+  if(e.type==="tool_use")console.log("TOOL",p.tool,(p.state&&p.state.status),p.callID)
+  if(e.type==="text"&&p.text)console.log("TEXT",p.text.replace(/\n+/g," ").trim())
+}' "$SP/ev.json"
+```
+Expected: `TOOL read completed cline-acp-...`, `TOOL bash completed cline-acp-...`, and a final TEXT containing `palindrome42`. The `cline-acp-` callID prefix confirms the ACP path (vs `cline-read-...-r0` for subprocess).
+
+- [ ] **Step 5: Commit any verification-driven fixes**
+
+If Steps 3-4 surface issues, fix per systematic-debugging, re-run, then:
+```bash
+git add -A && git commit -m "fix(provider): address ACP parity issues found in live verification"
+```
+
+---
+
+## Self-Review
+
+**Spec coverage:**
+- Runtime auto-detection → Task 2 (`detectAcpSupport`) + Task 6 (resolveMode) + Task 8 (template/install). ✓
+- ACP tool bridging parity → Task 1 (`bridgeAcpTool`) + Task 4 (runner rewrite). ✓
+- Reasoning → Task 3 (StreamEvent) + Task 4 (thought→reasoning-delta) + Task 5 (V3 parts). ✓
+- Usage recovery → Task 7. ✓
+- Dedup → Task 4 (assistantState prefix dedup retained; read dedup via emittedReads). ✓
+- Tests → each task; live verification Task 9. ✓
+- Non-goal passthrough → untouched. ✓
+
+**Placeholder scan:** No TBD/TODO; every code step has complete code. ✓
+
+**Type consistency:** `bridgeAcpTool` returns `{toolName, input}` (Task 1) consumed in Task 4; `buildAcpToolResult(toolName, rawOutput, contentText, ok)` signature consistent Task 1↔4; `detectAcpSupport(command, spawnFn?)` Task 2↔6; `translateSessionUpdate(update, ctx)` ctx shape identical Task 4 test↔impl; `StreamEvent` reasoning-delta Task 3↔4↔5; `readPersistedTaskUsage(taskId, options)` Task 7. ✓
+
+**Note on Task 5/6 tests:** they use `vi.mock(...)` factory mocks (hoisted) to replace `runStreamAcp` / `runStream` / `detectAcpSupport` — the reliable way to intercept a named import the SUT calls directly (`vi.spyOn` on an ESM namespace does NOT rebind an already-imported name in vitest). Each factory spreads `...actual` so untouched exports (e.g. `readPersistedTaskUsage`, `CLINE_READ_TOOL_NAME`) still resolve. Fallback if factory mocks ever break: prime the real `detectAcpSupport` cache and assert `resolveMode()`'s return string directly.
