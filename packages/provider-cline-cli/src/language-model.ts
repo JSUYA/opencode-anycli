@@ -20,6 +20,7 @@ import type {
 } from "@ai-sdk/provider"
 import { runOnce, runStream } from "./cline-runner.js"
 import { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
+import { detectAcpSupport } from "./cline-capabilities.js"
 import { runStreamJson } from "./stream-json-runner.js"
 import { DEFAULT_COMMAND, resolveCliRunProfile } from "./cli-profiles.js"
 import { composeClineHandoff, type ClineHandoffDiagnostics } from "./cline-handoff.js"
@@ -148,13 +149,25 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
     const defaultCommand = cli === "cline" ? "cline" : DEFAULT_COMMAND[cli]
     this.options = {
       cli,
-      mode: options.mode ?? "subprocess",
+      mode: options.mode ?? "auto",
       command: envOverrideBin ?? options.command ?? defaultCommand,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       extraArgs: options.extraArgs,
       cwd: options.cwd,
       env: options.env,
     }
+  }
+
+  /**
+   * Resolve the effective cline transport. "acp" / "subprocess" / "passthrough"
+   * are honored verbatim; "auto" (the default) probes `cline --help` once and
+   * picks ACP when the binary advertises `--acp` (cline-sr 0.5.1), else
+   * subprocess (cline-sr 0.6.0 removed the flag). Cline flavor only.
+   */
+  private async resolveMode(): Promise<"acp" | "subprocess"> {
+    if (this.options.mode === "acp") return "acp"
+    if (this.options.mode === "subprocess" || this.options.mode === "passthrough") return "subprocess"
+    return (await detectAcpSupport(this.options.command)) ? "acp" : "subprocess"
   }
 
   async doGenerate(options: LanguageModelV3CallOptions): Promise<Awaited<ReturnType<LanguageModelV3["doGenerate"]>>> {
@@ -222,13 +235,15 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
     // ACP 모드에서는 stdio JSON-RPC 를 통해 대용량 프롬프트 직접 처리
     // subprocess 모드에서는 파일 우회 로직 사용
     // ACP 는 타임아웃 없음 (timeoutMs: 0) — 대형 프롬프트 처리용
-    const runner = this.options.mode === "acp" ? runOnceAcp : runOnce
+    // mode:"auto" 는 cline --acp 지원 여부를 감지해 자동 선택
+    const effectiveMode = await this.resolveMode()
+    const runner = effectiveMode === "acp" ? runOnceAcp : runOnce
     const result = await runner({
       prompt: promptText,
-      usePromptFile: this.options.mode !== "acp", // ACP 는 파일 우회 불필요
+      usePromptFile: effectiveMode !== "acp", // ACP 는 파일 우회 불필요
       options: {
         command: this.options.command,
-        timeoutMs: this.options.mode === "acp" ? 0 : this.options.timeoutMs, // ACP 는 타임아웃 없음
+        timeoutMs: effectiveMode === "acp" ? 0 : this.options.timeoutMs, // ACP 는 타임아웃 없음
         model: this.modelId,
         extraArgs: this.options.extraArgs,
         cwd: this.options.cwd,
@@ -378,12 +393,14 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
     // summary / compaction calls that arrive without tools.
     const parserActive = registeredToolNames.size > 0
     const command = this.options.command
+    // mode:"auto" 는 cline --acp 지원 여부를 감지해 자동 선택
+    const effectiveMode = await this.resolveMode()
     // ACP 는 타임아웃 없음 (timeoutMs: 0) — 대형 프롬프트 처리용
-    const timeoutMs = this.options.mode === "acp" ? 0 : this.options.timeoutMs
+    const timeoutMs = effectiveMode === "acp" ? 0 : this.options.timeoutMs
     const extraArgs = this.options.extraArgs
     const cwd = this.options.cwd
     const env = this.options.env
-    const streamFn = this.options.mode === "acp" ? runStreamAcp : runStream
+    const streamFn = effectiveMode === "acp" ? runStreamAcp : runStream
     const responseId = cryptoRandomId()
 
     // Tie consumer cancellation (reader.cancel(), opencode tearing down
