@@ -4,6 +4,10 @@ import {
   SUPPORTED_OPENCODE_CALL_TOOLS,
   buildProtocolSection,
   detectSkillSlashCommand,
+  detectSubagentDispatches,
+  detectSubagentDispatchesInHandoff,
+  expandOpencodeCall,
+  wasSubagentDispatchedInHandoff,
 } from "../src/opencode-call-parser.js"
 
 describe("OpencodeCallParser", () => {
@@ -152,6 +156,120 @@ describe("SUPPORTED_OPENCODE_CALL_TOOLS allow-list", () => {
     expect(SUPPORTED_OPENCODE_CALL_TOOLS.has("task")).toBe(true)
     expect(SUPPORTED_OPENCODE_CALL_TOOLS.has("skill")).toBe(true)
     expect(SUPPORTED_OPENCODE_CALL_TOOLS.has("bash")).toBe(false)
+  })
+
+  it("includes the use_subagents fan-out alias", () => {
+    expect(SUPPORTED_OPENCODE_CALL_TOOLS.has("use_subagents")).toBe(true)
+  })
+})
+
+describe("buildProtocolSection use_subagents guidance", () => {
+  it("advertises use_subagents whenever task is registered", () => {
+    const section = buildProtocolSection([{ name: "task" }]) ?? ""
+    expect(section).toContain('name="use_subagents"')
+    expect(section).toContain('"tasks"')
+  })
+
+  it("does NOT advertise use_subagents when task is absent", () => {
+    const section = buildProtocolSection([{ name: "skill" }]) ?? ""
+    expect(section).not.toContain("use_subagents")
+  })
+})
+
+describe("expandOpencodeCall", () => {
+  it("passes non-use_subagents calls through unchanged", () => {
+    const call = { toolName: "task", input: { subagent_type: "a", description: "d", prompt: "p" } }
+    expect(expandOpencodeCall(call)).toEqual([call])
+  })
+
+  it("fans out use_subagents tasks[] into one task call per entry", () => {
+    const out = expandOpencodeCall({
+      toolName: "use_subagents",
+      input: {
+        tasks: [
+          { subagent_type: "code-reviewer", prompt: "review a.py", description: "review a" },
+          { subagent_type: "security-auditor", prompt: "audit b.py" },
+        ],
+      },
+    })
+    expect(out).toEqual([
+      { toolName: "task", input: { subagent_type: "code-reviewer", description: "review a", prompt: "review a.py" } },
+      { toolName: "task", input: { subagent_type: "security-auditor", description: "security-auditor subtask", prompt: "audit b.py" } },
+    ])
+  })
+
+  it("accepts agent/task alias fields and subagents[] key", () => {
+    const out = expandOpencodeCall({
+      toolName: "use_subagents",
+      input: { subagents: [{ agent: "architect", task: "map the modules" }] },
+    })
+    expect(out).toEqual([
+      { toolName: "task", input: { subagent_type: "architect", description: "architect subtask", prompt: "map the modules" } },
+    ])
+  })
+
+  it("skips entries missing an agent name or prompt", () => {
+    const out = expandOpencodeCall({
+      toolName: "use_subagents",
+      input: { tasks: [{ prompt: "no agent" }, { subagent_type: "x" }, { subagent_type: "ok", prompt: "go" }] },
+    })
+    expect(out).toEqual([
+      { toolName: "task", input: { subagent_type: "ok", description: "ok subtask", prompt: "go" } },
+    ])
+  })
+
+  it("returns [] for a use_subagents call with no valid entries", () => {
+    expect(expandOpencodeCall({ toolName: "use_subagents", input: {} })).toEqual([])
+    expect(expandOpencodeCall({ toolName: "use_subagents", input: { tasks: [] } })).toEqual([])
+  })
+})
+
+describe("detectSubagentDispatches", () => {
+  it("detects hyphenated agents named next to a subagent keyword (Korean)", () => {
+    const out = detectSubagentDispatches(
+      "code-reviewer 서브에이전트로 a.py를, security-auditor 서브에이전트로 b.py를 각각 리뷰하게 시켜줘.",
+    )
+    expect(out.map((d) => d.subagent_type)).toEqual(["code-reviewer", "security-auditor"])
+    // each gets the clause that mentions it (so its target file is included)
+    expect(out[0]!.prompt).toContain("a.py")
+    expect(out[1]!.prompt).toContain("b.py")
+  })
+
+  it("detects @agent-name mentions", () => {
+    const out = detectSubagentDispatches("Have @architect map the modules and @debugger check the crash.")
+    expect(out.map((d) => d.subagent_type)).toEqual(["architect", "debugger"])
+  })
+
+  it("does NOT fire on a bare subagent keyword with no named agent", () => {
+    expect(detectSubagentDispatches("여러 서브에이전트를 최대한 활용해서 분석해줘")).toEqual([])
+    expect(detectSubagentDispatches("use subagents to analyze this project")).toEqual([])
+  })
+
+  it("dedupes a repeated agent and returns empty for empty input", () => {
+    const out = detectSubagentDispatches("code-reviewer 에이전트로 리뷰하고 code-reviewer 에이전트 다시 실행")
+    expect(out.map((d) => d.subagent_type)).toEqual(["code-reviewer"])
+    expect(detectSubagentDispatches("")).toEqual([])
+  })
+})
+
+describe("wasSubagentDispatchedInHandoff / detectSubagentDispatchesInHandoff", () => {
+  const handoff = (userReq: string, extra = "") =>
+    `[SOME_HEADER]\n${extra}\n[CURRENT_USER_REQUEST]\n${userReq}\n[/CURRENT_USER_REQUEST]\n`
+
+  it("detects dispatches from the CURRENT_USER_REQUEST section", () => {
+    const out = detectSubagentDispatchesInHandoff(handoff("code-reviewer 서브에이전트로 a.py 리뷰해줘"))
+    expect(out.map((d) => d.subagent_type)).toEqual(["code-reviewer"])
+  })
+
+  it("loop-guard: skips an agent already dispatched earlier in the handoff", () => {
+    const prior = '<tool-call name="task">{"subagent_type":"code-reviewer","description":"x","prompt":"y"}</tool-call>'
+    expect(wasSubagentDispatchedInHandoff(handoff("code-reviewer 서브에이전트로 리뷰", prior), "code-reviewer")).toBe(true)
+    const out = detectSubagentDispatchesInHandoff(handoff("code-reviewer 서브에이전트로 a.py 리뷰해줘", prior))
+    expect(out).toEqual([])
+  })
+
+  it("returns [] when there is no CURRENT_USER_REQUEST section", () => {
+    expect(detectSubagentDispatchesInHandoff("no markers here code-reviewer 서브에이전트")).toEqual([])
   })
 })
 

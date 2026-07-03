@@ -156,6 +156,17 @@ export function buildProtocolSection(tools: readonly ProtocolToolDescriptor[]): 
     lines.push(
       '  <opencode-call name="task">{"subagent_type":"<agent>","description":"<3-5 words>","prompt":"<text>"}</opencode-call>',
     )
+    // Parallel / multiple independent subagents in ONE tag. There is NO native
+    // use_subagents tool in this environment — emitting this tag is the ONLY
+    // way to run several subagents; the host expands it into one `task`
+    // dispatch per entry. Prevents the model from "narrating" use_subagents
+    // and fabricating results instead of actually dispatching.
+    lines.push(
+      "  For SEVERAL independent subagents at once (NO native use_subagents tool exists here):",
+    )
+    lines.push(
+      '  <opencode-call name="use_subagents">{"tasks":[{"subagent_type":"<agent>","prompt":"<text>"}]}</opencode-call>',
+    )
   }
   if (names.has("skill")) {
     lines.push(
@@ -193,7 +204,64 @@ export const SUPPORTED_OPENCODE_CALL_TOOLS: ReadonlySet<string> = new Set([
   // omac-scheduler plugin tools (true background parallel lanes).
   "lane_dispatch",
   "lane_collect",
+  // Fan-out alias: cline's models reach for a native `use_subagents` tool that
+  // does NOT exist here. We accept the name and expand it host-side into real
+  // `task` dispatches (see expandOpencodeCall) so the intent produces actual,
+  // visible subagent sessions instead of a fabricated summary.
+  "use_subagents",
 ])
+
+/**
+ * Expand a parsed opencode-call into the concrete tool-call(s) to dispatch.
+ *
+ * `use_subagents` is not a real opencode tool — cline's models emit it (or
+ * narrate it) when they want to run several subagents in parallel. We turn one
+ * `use_subagents` tag into one `task` dispatch per entry, so the model's
+ * preferred primitive becomes real, visible opencode subagent sessions. Every
+ * other tool passes through unchanged.
+ *
+ * Accepted input shapes (models are inconsistent):
+ *   {"tasks":[{subagent_type|agent|agent_type, prompt|task, description?}, ...]}
+ *   {"subagents":[...]}  {"agents":[...]}
+ * Entries missing an agent name or prompt are skipped.
+ */
+export function expandOpencodeCall(call: OpencodeCall): OpencodeCall[] {
+  if (call.toolName !== "use_subagents") return [call]
+  const input = (call.input ?? {}) as Record<string, unknown>
+  const list = Array.isArray(input["tasks"])
+    ? (input["tasks"] as unknown[])
+    : Array.isArray(input["subagents"])
+      ? (input["subagents"] as unknown[])
+      : Array.isArray(input["agents"])
+        ? (input["agents"] as unknown[])
+        : []
+  const out: OpencodeCall[] = []
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue
+    const o = item as Record<string, unknown>
+    const subagent_type =
+      typeof o["subagent_type"] === "string"
+        ? (o["subagent_type"] as string)
+        : typeof o["agent"] === "string"
+          ? (o["agent"] as string)
+          : typeof o["agent_type"] === "string"
+            ? (o["agent_type"] as string)
+            : null
+    const prompt =
+      typeof o["prompt"] === "string"
+        ? (o["prompt"] as string)
+        : typeof o["task"] === "string"
+          ? (o["task"] as string)
+          : null
+    if (!subagent_type || subagent_type.length === 0 || !prompt || prompt.length === 0) continue
+    const description =
+      typeof o["description"] === "string" && (o["description"] as string).length > 0
+        ? (o["description"] as string)
+        : `${subagent_type} subtask`
+    out.push({ toolName: "task", input: { subagent_type, description, prompt } })
+  }
+  return out
+}
 
 /**
  * Detect a slash-command-style skill dispatch in opencode's command
@@ -370,4 +438,98 @@ export function detectSkillNaturalLanguageInHandoff(handoffText: string): string
   if (!userMatch || !userMatch[1]) return null
   const skills = extractAvailableSkillNames(handoffText)
   return detectSkillNaturalLanguage(userMatch[1], skills)
+}
+
+/** One host-side subagent dispatch derived from the user's prose. */
+export interface SubagentDispatch {
+  subagent_type: string
+  description: string
+  prompt: string
+}
+
+/**
+ * Detect explicit subagent-delegation intent in the latest user request and
+ * turn it into concrete `task` dispatches — WITHOUT the model's cooperation.
+ *
+ * Why this exists: cline's GaussO4.1-CLI model frequently narrates
+ * "use_subagents 도구로 병렬 실행하겠습니다" and then FABRICATES a subagent
+ * report without ever emitting an `<opencode-call>` tag (0 task tool-parts, 0
+ * child sessions — see the docs). The `<opencode-call>` protocol only works
+ * when the model volunteers the tag, which it does not for natural prose. This
+ * detector is the model-independent counterpart to the skill bypass: when the
+ * user explicitly names a specialist agent next to a subagent keyword, the
+ * provider dispatches it directly, so a real, visible child session runs.
+ *
+ * Detection (deliberately conservative to avoid phantom dispatches):
+ *   - `@agent-name`                               (explicit mention), or
+ *   - `<hyphenated-agent-name>` immediately followed (optional Korean particle)
+ *     by a subagent keyword (서브에이전트 / 에이전트 / subagent / agent).
+ * Single bare words never match on their own — only hyphenated ids or `@name`.
+ * opencode validates the agent id, so an unknown name surfaces a visible
+ * "Unknown agent type" error rather than a fabricated success.
+ *
+ * Each detected agent is dispatched with the clause of the request that
+ * mentions it (from its position to the next agent's, or end), falling back to
+ * the whole request when that clause is too short to stand alone.
+ */
+export function detectSubagentDispatches(userText: string): SubagentDispatch[] {
+  if (!userText || userText.length === 0) return []
+  const KW = "(?:서브\\s*에이전트|서브에이전트|sub-?agents?|에이전트|agents?)"
+  const PARTICLE = "(?:로|으로|가|이|는|은|을|를|에게|한테|,)?"
+  const mentions: Array<{ agent: string; index: number }> = []
+  const push = (agent: string, index: number) => {
+    if (!agent) return
+    const norm = agent.toLowerCase()
+    if (!mentions.some((m) => m.agent === norm)) mentions.push({ agent: norm, index })
+  }
+  // (a) @agent-name — explicit reference.
+  const atRe = /@([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\b/gi
+  let m: RegExpExecArray | null
+  while ((m = atRe.exec(userText)) !== null) if (m[1]) push(m[1], m.index)
+  // (b) hyphenated-agent-name adjacent to a subagent keyword.
+  const kwRe = new RegExp(`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\\s*${PARTICLE}\\s*${KW}`, "gi")
+  while ((m = kwRe.exec(userText)) !== null) if (m[1]) push(m[1], m.index)
+  if (mentions.length === 0) return []
+  mentions.sort((a, b) => a.index - b.index)
+  const out: SubagentDispatch[] = []
+  for (let i = 0; i < mentions.length; i++) {
+    const start = mentions[i]!.index
+    const end = i + 1 < mentions.length ? mentions[i + 1]!.index : userText.length
+    let clause = userText.slice(start, end).trim()
+    if (clause.length < 12) clause = userText.trim()
+    out.push({
+      subagent_type: mentions[i]!.agent,
+      description: `${mentions[i]!.agent} subtask`,
+      prompt: clause,
+    })
+  }
+  return out
+}
+
+/**
+ * Loop guard: true when the handoff already contains a `task` tool-call for
+ * this agent (opencode resumed us after the dispatch completed). Without this,
+ * the still-present user request would be re-detected and re-dispatched every
+ * turn. Mirrors isSkillAlreadyDispatchedInHandoff.
+ */
+export function wasSubagentDispatchedInHandoff(handoffText: string, agent: string): boolean {
+  if (!agent || agent.length === 0) return false
+  const escaped = agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return new RegExp(`<tool-call name="task">[^<]{0,600}"subagent_type":"${escaped}"`, "i").test(handoffText)
+}
+
+/** Extract the latest user request from a handoff blob (or null). */
+function extractCurrentUserRequest(handoffText: string): string | null {
+  const match = handoffText.match(/\[CURRENT_USER_REQUEST\]\n([\s\S]*?)\n\[\/CURRENT_USER_REQUEST\]/)
+  return match && match[1] ? match[1] : null
+}
+
+/**
+ * Run detectSubagentDispatches against a full handoff and drop any agent
+ * already dispatched earlier in the conversation (loop guard).
+ */
+export function detectSubagentDispatchesInHandoff(handoffText: string): SubagentDispatch[] {
+  const userText = extractCurrentUserRequest(handoffText)
+  if (userText === null) return []
+  return detectSubagentDispatches(userText).filter((d) => !wasSubagentDispatchedInHandoff(handoffText, d.subagent_type))
 }

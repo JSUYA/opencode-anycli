@@ -29,9 +29,12 @@ import {
   SUPPORTED_OPENCODE_CALL_TOOLS,
   detectSkillNaturalLanguageInHandoff,
   detectSkillSlashCommand,
+  detectSubagentDispatchesInHandoff,
+  expandOpencodeCall,
   isSkillAlreadyDispatchedInHandoff,
   type OpencodeCall,
   type ProtocolToolDescriptor,
+  type SubagentDispatch,
 } from "./opencode-call-parser.js"
 import type { CliFlavor, ClineMode, ClineProviderOptions, ClineUsage } from "./types.js"
 
@@ -232,6 +235,16 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
     )
     if (nlSkill !== null) return nlSkill
 
+    // Host-side subagent dispatch: if the user explicitly named specialist
+    // agents, dispatch the `task` calls ourselves BEFORE running cline, so real
+    // child sessions run instead of the model narrating + fabricating a report.
+    const subagentBypass = maybeResolveSubagentBypass(
+      detectSubagentDispatchesInHandoff(promptText),
+      tools,
+      this.modelId,
+    )
+    if (subagentBypass !== null) return subagentBypass
+
     // ACP 모드에서는 stdio JSON-RPC 를 통해 대용량 프롬프트 직접 처리
     // subprocess 모드에서는 파일 우회 로직 사용
     // ACP 는 타임아웃 없음 (timeoutMs: 0) — 대형 프롬프트 처리용
@@ -261,11 +274,31 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
       registeredToolNames.size > 0
         ? parseOpencodeCallsOnce(result.text, registeredToolNames)
         : { text: result.text, calls: [] }
-    
+
+    // Expand use_subagents into concrete `task` dispatches; any tag we cannot
+    // turn into a real registered call is recovered back into visible text so
+    // nothing silently disappears.
+    let recoveredText = parsed.text
+    const surfaceText = (c: OpencodeCall) => {
+      recoveredText += `<opencode-call name="${c.toolName}">${JSON.stringify(c.input)}</opencode-call>`
+    }
+    const expandedCalls: OpencodeCall[] = []
+    for (const raw of parsed.calls) {
+      const ex = expandOpencodeCall(raw)
+      if (raw.toolName === "use_subagents" && ex.length === 0) {
+        surfaceText(raw)
+        continue
+      }
+      for (const call of ex) {
+        if (!registeredToolNames.has(call.toolName)) surfaceText(call)
+        else expandedCalls.push(call)
+      }
+    }
+
     // Filter out duplicate tool-calls to prevent infinite loops
     const uniqueCalls: OpencodeCall[] = []
     const duplicateCallCount = { count: 0 }
-    for (const call of parsed.calls) {
+    for (const call of expandedCalls) {
       if (isDuplicateToolCall(this.previousToolCalls, call.toolName, call.input)) {
         duplicateCallCount.count++
         continue
@@ -273,9 +306,9 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
       trackToolCall(this.previousToolCalls, call.toolName, call.input, ClineLanguageModel.MAX_TOOL_CALL_CACHE)
       uniqueCalls.push(call)
     }
-    
+
     const content: Array<LanguageModelV3StreamPart | { type: "text"; text: string } | { type: "tool-call"; toolCallId: string; toolName: string; input: string }> = []
-    if (parsed.text.length > 0) content.push({ type: "text", text: parsed.text })
+    if (recoveredText.length > 0) content.push({ type: "text", text: recoveredText })
     for (const call of uniqueCalls) {
       content.push({
         type: "tool-call",
@@ -386,6 +419,15 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
       promptText,
     )
     if (nlStream !== null) return nlStream
+
+    // Host-side subagent dispatch (see doGenerate for rationale): emit the
+    // `task` tool-calls ourselves when the user named specialist agents.
+    const subagentStream = maybeResolveSubagentBypassStream(
+      detectSubagentDispatchesInHandoff(promptText),
+      tools,
+      modelId,
+    )
+    if (subagentStream !== null) return subagentStream
 
     const registeredToolNames = registeredSupportedToolNames(tools)
     // Only instantiate the parser when at least one supported tool is
@@ -502,32 +544,44 @@ private static readonly MAX_TOOL_CALL_CACHE = 100
         let emittedOpencodeCallCount = 0
         let duplicateCallCount = 0
         const parser = parserActive ? new OpencodeCallParser() : null
+        const surfaceCallAsText = (call: OpencodeCall) => {
+          // Don't dispatch — surface the parsed body as text so the user still
+          // sees what cline produced (unregistered tool, or a use_subagents
+          // tag we couldn't expand into any valid task).
+          const fallback = `<opencode-call name="${call.toolName}">${JSON.stringify(call.input)}</opencode-call>`
+          const id = openTextBlock()
+          safeEnqueue({ type: "text-delta", id, delta: fallback })
+        }
         const emitOpencodeCalls = (calls: ReadonlyArray<OpencodeCall>) => {
-          for (const call of calls) {
-            if (!registeredToolNames.has(call.toolName)) {
-              // Registered-tool mismatch: don't dispatch — the host may not
-              // have this tool in the current call. Surface the parsed body
-              // as text so the user still sees what cline produced.
-              const fallback = `<opencode-call name="${call.toolName}">${JSON.stringify(call.input)}</opencode-call>`
-              const id = openTextBlock()
-              safeEnqueue({ type: "text-delta", id, delta: fallback })
+          for (const raw of calls) {
+            // use_subagents fans out into one `task` dispatch per entry; every
+            // other call passes through unchanged.
+            const expanded = expandOpencodeCall(raw)
+            if (raw.toolName === "use_subagents" && expanded.length === 0) {
+              surfaceCallAsText(raw)
               continue
             }
-            // Check for duplicate tool-calls to prevent infinite loops
-            if (isDuplicateToolCall(thisInstance.previousToolCalls, call.toolName, call.input)) {
-              duplicateCallCount++
-              continue
+            for (const call of expanded) {
+              if (!registeredToolNames.has(call.toolName)) {
+                surfaceCallAsText(call)
+                continue
+              }
+              // Check for duplicate tool-calls to prevent infinite loops
+              if (isDuplicateToolCall(thisInstance.previousToolCalls, call.toolName, call.input)) {
+                duplicateCallCount++
+                continue
+              }
+              trackToolCall(thisInstance.previousToolCalls, call.toolName, call.input, ClineLanguageModel.MAX_TOOL_CALL_CACHE)
+              closeReasoningBlock()
+              closeTextBlock()
+              safeEnqueue({
+                type: "tool-call",
+                toolCallId: cryptoToolCallId(),
+                toolName: call.toolName,
+                input: JSON.stringify(call.input),
+              })
+              emittedOpencodeCallCount++
             }
-            trackToolCall(thisInstance.previousToolCalls, call.toolName, call.input, ClineLanguageModel.MAX_TOOL_CALL_CACHE)
-            closeReasoningBlock()
-            closeTextBlock()
-            safeEnqueue({
-              type: "tool-call",
-              toolCallId: cryptoToolCallId(),
-              toolName: call.toolName,
-              input: JSON.stringify(call.input),
-            })
-            emittedOpencodeCallCount++
           }
         }
         try {
@@ -899,6 +953,11 @@ function registeredSupportedToolNames(tools: readonly ProtocolToolDescriptor[]):
   for (const tool of tools) {
     if (SUPPORTED_OPENCODE_CALL_TOOLS.has(tool.name)) names.add(tool.name)
   }
+  // `use_subagents` is a fan-out alias, not a real opencode tool, so it never
+  // appears in `tools`. Accept it (so it survives the parse/emit gate) whenever
+  // its expansion target `task` is registered; expandOpencodeCall turns it into
+  // real `task` dispatches before anything is emitted to opencode.
+  if (names.has("task")) names.add("use_subagents")
   return names
 }
 
@@ -1035,6 +1094,99 @@ function maybeResolveSkillBypassStream(
           totalCost: undefined,
         }),
         providerMetadata: bypassMetadata(skillName, modelId, source),
+      })
+      controller.close()
+    },
+  })
+  return { stream, response: { headers: {} } }
+}
+
+function subagentBypassMetadata(dispatches: readonly SubagentDispatch[], modelId: string) {
+  return {
+    cline: {
+      opencodeCalls: dispatches.length,
+      subagentBypass: dispatches.map((d) => d.subagent_type),
+      modelLabel: modelId,
+    },
+  }
+}
+
+function subagentToolCalls(dispatches: readonly SubagentDispatch[]) {
+  return dispatches.map((d) => ({
+    type: "tool-call" as const,
+    toolCallId: cryptoToolCallId(),
+    toolName: "task",
+    input: JSON.stringify({ subagent_type: d.subagent_type, description: d.description, prompt: d.prompt }),
+  }))
+}
+
+/**
+ * doGenerate-side host bypass. When the user explicitly named specialist
+ * agents, dispatch the `task` calls ourselves — the model never gets a chance
+ * to fabricate a subagent report. Returns null when nothing was detected or
+ * `task` isn't registered in this call.
+ */
+function maybeResolveSubagentBypass(
+  dispatches: readonly SubagentDispatch[],
+  tools: readonly ProtocolToolDescriptor[],
+  modelId: string,
+): Awaited<ReturnType<LanguageModelV3["doGenerate"]>> | null {
+  if (dispatches.length === 0) return null
+  if (!tools.some((t) => t.name === "task")) return null
+  const content = subagentToolCalls(dispatches)
+  return {
+    content: content as Awaited<ReturnType<LanguageModelV3["doGenerate"]>>["content"],
+    finishReason: { unified: "tool-calls", raw: "subagent-bypass" },
+    usage: toV3Usage({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+      totalTokens: 0,
+      totalCost: undefined,
+    }),
+    warnings: [],
+    response: {
+      id: cryptoRandomId(),
+      timestamp: new Date(),
+      modelId,
+    },
+    providerMetadata: subagentBypassMetadata(dispatches, modelId),
+  }
+}
+
+/** doStream-side counterpart of maybeResolveSubagentBypass. */
+function maybeResolveSubagentBypassStream(
+  dispatches: readonly SubagentDispatch[],
+  tools: readonly ProtocolToolDescriptor[],
+  modelId: string,
+): Awaited<ReturnType<LanguageModelV3["doStream"]>> | null {
+  if (dispatches.length === 0) return null
+  if (!tools.some((t) => t.name === "task")) return null
+  const responseId = cryptoRandomId()
+  const calls = subagentToolCalls(dispatches)
+  const stream = new ReadableStream<LanguageModelV3StreamPart>({
+    start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] })
+      controller.enqueue({
+        type: "response-metadata",
+        id: responseId,
+        timestamp: new Date(),
+        modelId,
+      })
+      for (const c of calls) controller.enqueue(c)
+      controller.enqueue({
+        type: "finish",
+        finishReason: { unified: "tool-calls", raw: "subagent-bypass" },
+        usage: toV3Usage({
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+          totalTokens: 0,
+          totalCost: undefined,
+        }),
+        providerMetadata: subagentBypassMetadata(dispatches, modelId),
       })
       controller.close()
     },
