@@ -28,7 +28,7 @@
       },
       "options": {
         "cli": "cline",
-        "mode": "subprocess"
+        "mode": "auto"
       }
     },
     "claude": {

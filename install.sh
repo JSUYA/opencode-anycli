@@ -139,6 +139,8 @@ oc_json_merge() {
       | (merge_enabled_providers($T; $E) as $enabled
           | if $enabled != null then .enabled_providers = $enabled else . end)
       | migrate_legacy_cline_models($T)
+      | (if (.provider.cline.options.mode? // "") == "subprocess"
+           then .provider.cline.options.mode = "auto" else . end)
     ' "$tmpl_file" "$existing" || rc=$?
   else
     node -e '
@@ -177,6 +179,8 @@ oc_json_merge() {
           delete models["GaussO3.3"];
           delete models.default;
         }
+        const clineOpts=out.provider?.cline?.options;
+        if(clineOpts&&clineOpts.mode==="subprocess") clineOpts.mode="auto";
         return out;
       }
       process.stdout.write(JSON.stringify(migrateLegacyClineModels(mergeEnabledProviders(m(T,E),T,E),T),null,2)+"\n");

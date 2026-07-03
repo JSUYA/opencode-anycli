@@ -5,7 +5,16 @@ The provider drives one of three CLIs, selected by the `cli` option
 claude and codex always run as subprocess stream-json sessions (see the last
 section).
 
-`provider-cline-cli` supports three mode values for cline. `subprocess` is the default, `acp` is implemented as an opt-in transport, and `passthrough` is planned.
+`provider-cline-cli` supports four mode values for cline. `auto` is the default (recommended), `subprocess` and `acp` force a specific transport, and `passthrough` is planned.
+
+## Auto (default)
+
+`mode: "auto"` probes `cline --help` once per process and selects the transport automatically:
+
+- Binary advertises `--acp` (Samsung cline-sr **0.5.1**) → **ACP**.
+- Binary lacks `--acp` (cline-sr **0.6.0** removed it) → **subprocess**.
+
+No manual config or reinstall is needed when cline is upgraded/downgraded — the probe result is cached per command for the process lifetime. Set `mode` explicitly to `"acp"` or `"subprocess"` to bypass detection. The probe runs `cline --help` (no API call) and falls back to subprocess on any error/timeout.
 
 ## Subprocess
 
@@ -15,9 +24,9 @@ Large prompts are handled automatically: when the flattened prompt exceeds the s
 
 ## ACP
 
-ACP mode starts cline with `cline --acp` and speaks the Agent Client Protocol over stdio JSON-RPC. The prompt travels in the protocol body rather than argv, and the provider translates ACP session updates into the same opencode stream parts used by subprocess mode.
+ACP mode starts cline with `cline --acp` and speaks the Agent Client Protocol over stdio JSON-RPC. The prompt travels in the protocol body rather than argv, and the provider translates ACP session updates into the same opencode stream parts used by subprocess mode: native tool calls (read/bash/edit/write/grep) are bridged as provider-executed tool-call/result parts, cline reasoning becomes a V3 reasoning part, and token usage is recovered from the persisted cline task files.
 
-> **⚠️ ACP is NOT available in the Samsung `cline-sr` build (0.6.0).** That CLI has no `--acp` flag — because it enables `allowUnknownOption`, passing `--acp` is silently ignored and cline falls back to interactive TUI mode, which aborts with `error: interactive mode requires a TTY (stdin/stdout must both be terminals)` when opencode drives it over pipes. **Keep `mode: "subprocess"`** (the installed default). Subprocess mode already handles arbitrarily large prompts via the temp-file spill, so there is no functional reason to switch. Only select `mode: "acp"` against an upstream cline build that actually ships the `--acp` transport.
+> **Version requirement.** ACP needs a cline-sr build that ships `--acp`: **0.5.1 has it, 0.6.0 removed it.** On a build without `--acp` the flag is silently ignored (cline enables `allowUnknownOption`) and cline falls into interactive TUI mode, aborting with `error: interactive mode requires a TTY` when driven over pipes. Prefer `mode: "auto"` — it detects `--acp` support and only uses ACP when available, falling back to subprocess otherwise. Force `mode: "acp"` only against a build you know supports it.
 
 ## Passthrough
 
@@ -39,4 +48,4 @@ they use the existing local OAuth login for credentials.
 
 ## Recommendation
 
-Use subprocess mode by default. Use ACP when you specifically want to exercise cline's ACP transport or need its richer structured updates. Passthrough should not be selected until it is implemented.
+Leave `mode: "auto"` (the default). It runs ACP on cline-sr 0.5.1 (larger context via the JSON-RPC body, structured tool/reasoning updates) and subprocess on 0.6.0, with no manual switching. Force `subprocess` or `acp` only to pin a transport for debugging. Passthrough should not be selected until it is implemented.
