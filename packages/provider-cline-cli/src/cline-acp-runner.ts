@@ -218,6 +218,16 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   // silently emitting a finish event.
   let killReason: "abort" | "client-error" | "idle-timeout" | null = null
 
+  // Diagnostic breadcrumbs: which ACP phase the turn is in and whether cline has
+  // streamed anything yet. Folded into the stall error so a hang tells us WHERE
+  // it hung — initialize / newSession / awaiting the model's first token /
+  // mid-stream — instead of just "stalled". A stall in newSession points at
+  // ~/.cline-sr state; a stall while awaiting-first-token points at model
+  // latency (a huge prompt's prefill); a mid-stream stall points at a blocked
+  // tool/command.
+  let phase: "spawn" | "initialize" | "newSession" | "awaiting-first-token" | "streaming" = "spawn"
+  let sawOutput = false
+
   // Health watchdog. ACP has no TOTAL time limit (large prompts / long
   // inference must run to completion), but a stalled or deadlocked cline —
   // e.g. several subagents contending on the shared ~/.cline-sr state — streams
@@ -256,7 +266,8 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
     killReason = "idle-timeout"
     forwardDiag = false
     exitErr = new Error(
-      `cline --acp ${reason}; aborting the turn so the caller (and any parent task) isn't blocked forever. ` +
+      `cline --acp ${reason} [phase=${phase}, output=${sawOutput ? "streamed" : "none"}]; ` +
+        `aborting the turn so the caller (and any parent task) isn't blocked forever. ` +
         `Tune the silence window with OPENCODE_ANYCLI_ACP_IDLE_MS.`,
     )
     if (DEBUG) process.stderr.write(`[cline-acp] ${reason} — killing pid ${child.pid}\n`)
@@ -311,6 +322,10 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   let exitErr: Error | null = null
   function enqueue(ev: StreamEvent) {
     queue.push(ev)
+    if (ev.type === "text-delta" || ev.type === "reasoning-delta" || ev.type === "tool-call" || ev.type === "tool-result") {
+      sawOutput = true
+      phase = "streaming"
+    }
     armIdle() // any real ACP activity resets the silence window
     if (resolveNext) {
       const r = resolveNext
@@ -399,16 +414,23 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   // when the turn completes (or rejects on protocol/transport error).
   ;(async () => {
     try {
+      phase = "initialize"
       await connection.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
           // We don't advertise fs / terminal — cline self-services those.
         },
       })
+      phase = "newSession"
       const sess = await connection.newSession({
         cwd: options.cwd ?? process.cwd(),
         mcpServers: [],
       })
+      // Prompt sent; nothing streamed back yet. If we stall here it's the model
+      // taking too long to produce its first token (a huge prompt's prefill),
+      // not cline being wedged — enqueue() flips this to "streaming" on the
+      // first chunk.
+      phase = "awaiting-first-token"
       const result = await connection.prompt({
         sessionId: sess.sessionId,
         prompt: [{ type: "text", text: input.prompt }],
