@@ -229,7 +229,7 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
 
   // Track exit cause so we can surface a real error in `close` instead of
   // silently emitting a finish event.
-  let killReason: "abort" | "client-error" | "idle-timeout" | null = null
+  let killReason: "abort" | "client-error" | "idle-timeout" | "idle-graceful" | null = null
 
   // Diagnostic breadcrumbs: which ACP phase the turn is in and whether cline has
   // streamed anything yet. Folded into the stall error so a hang tells us WHERE
@@ -276,14 +276,39 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   }
   const terminateHung = (reason: string) => {
     if (done) return
-    killReason = "idle-timeout"
+    clearIdle()
     forwardDiag = false
+    if (DEBUG) process.stderr.write(`[cline-acp] ${reason} [phase=${phase}, output=${sawOutput ? "streamed" : "none"}] — killing pid ${child.pid}\n`)
+
+    if (sawOutput) {
+      // cline streamed a response and then went silent. This is almost never a
+      // true deadlock — it's cline holding the turn OPEN on an interactive ask
+      // that ACP can't answer: `mistake_limit_reached` ("Cline is having
+      // trouble, continue with guidance?"), `resume_task`, or a followup
+      // question. --yolo auto-approves *actions* but cannot answer a question,
+      // so cline waits forever. Erroring here makes opencode retry the same
+      // message endlessly (the "Thinking" loop). Instead FINISH the turn
+      // gracefully with what cline already streamed: opencode surfaces cline's
+      // message (its question / "I'm stuck" note) as a normal reply, the retry
+      // loop stops, and the user can respond in the next turn.
+      killReason = "idle-graceful"
+      try { child.kill("SIGKILL") } catch { /* ignore */ }
+      const taskId = latestClineTaskId(options, runStartMs)
+      const recovered = taskId !== null ? readPersistedTaskUsage(taskId, options) : null
+      enqueue({ type: "finish", usage: recovered ?? usage, parseErrors: 0 })
+      finish()
+      return
+    }
+
+    // No output at all — a genuine early hang (initialize / newSession / a
+    // prefill that never produced a first token). Nothing to salvage; surface an
+    // error so the caller (and any parent task) isn't blocked forever.
+    killReason = "idle-timeout"
     exitErr = new Error(
-      `cline --acp ${reason} [phase=${phase}, output=${sawOutput ? "streamed" : "none"}]; ` +
+      `cline --acp ${reason} [phase=${phase}, output=none]; ` +
         `aborting the turn so the caller (and any parent task) isn't blocked forever. ` +
         `Tune the silence window with OPENCODE_ANYCLI_ACP_IDLE_MS.`,
     )
-    if (DEBUG) process.stderr.write(`[cline-acp] ${reason} — killing pid ${child.pid}\n`)
     try { child.kill("SIGKILL") } catch { /* ignore */ }
     enqueue({ type: "error", error: exitErr })
     finish()
@@ -477,7 +502,10 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   child.on("close", (code, sigterm) => {
     forwardDiag = false
     signal?.removeEventListener("abort", onAbort)
-    if (killReason === "abort") {
+    if (killReason === "idle-graceful") {
+      // Graceful stall-finish already enqueued a `finish` event; our own SIGKILL
+      // is expected cleanup, so do NOT turn it into an error.
+    } else if (killReason === "abort") {
       exitErr = new Error(`cline ACP aborted by caller (signal ${sigterm ?? "SIGTERM"})`)
     } else if (exitErr === null && code !== 0 && code !== null) {
       exitErr = new Error(`cline --acp exited with code ${code}${sigterm ? ` (signal ${sigterm})` : ""}`)
