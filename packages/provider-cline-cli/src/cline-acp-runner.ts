@@ -74,18 +74,52 @@ export function readProcStat(pid: number): { ppid: number; state: string; cpu: n
 }
 
 /**
- * CPU jiffies summed over the process subtree rooted at `root`, plus liveness.
+ * rchar+wchar from /proc/<pid>/io: the cumulative bytes this task has passed to
+ * read()/write()-family syscalls. This counts sockets, pipes, tty and files —
+ * NOT just physical disk I/O — so it advances whenever cline is doing real work
+ * that burns little or no CPU: waiting on / streaming tokens from a remote model
+ * over a socket, or (the case that bit us) reading and atomically rewriting its
+ * multi-MB `~/.cline-sr` task-history file on every turn. Returns 0 if
+ * unreadable (kernel too old, or /proc/<pid>/io gone because the process died).
+ */
+export function readProcIo(pid: number): number {
+  try {
+    const io = readFileSync(`/proc/${pid}/io`, "utf8")
+    const rchar = Number(/rchar:\s*(\d+)/.exec(io)?.[1] ?? 0)
+    const wchar = Number(/wchar:\s*(\d+)/.exec(io)?.[1] ?? 0)
+    return (Number.isFinite(rchar) ? rchar : 0) + (Number.isFinite(wchar) ? wchar : 0)
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Liveness + a monotonic PROGRESS metric over the process subtree rooted at
+ * `root`: CPU jiffies (utime+stime) AND I/O bytes (rchar+wchar). Either one
+ * advancing between two samples means cline is doing real work and is NOT
+ * deadlocked.
+ *
+ * CPU alone is NOT enough. The common case — cline waiting on or streaming from
+ * a REMOTE model, where inference runs on the server and the local process just
+ * blocks on a socket — burns ~zero CPU, and so does the several-second window in
+ * which cline reads+rewrites its big task-history file (I/O-bound). A CPU-only
+ * probe misreads both as a deadlock and SIGKILLs a perfectly healthy turn (which
+ * also aborts the atomic history write, leaving `.tmp` orphans that slow the
+ * NEXT turn — a compounding failure). Folding in I/O bytes fixes this: a working
+ * cline moves megabytes even at idle CPU; only a genuinely wedged process (lock
+ * contention, futex) moves neither.
+ *
  * `alive:false` → root process is gone; `cpu:NaN` → /proc unreadable (can't
  * probe, caller should keep waiting). Summing the whole subtree means a cline
- * that is merely blocked on a long child command (which is itself burning CPU)
- * still shows progress and is NOT mistaken for a deadlock.
+ * blocked on a long child command (itself burning CPU or doing I/O) still shows
+ * progress.
  */
-export function subtreeCpu(root: number): { alive: boolean; zombie: boolean; cpu: number } {
+export function subtreeProgress(root: number): { alive: boolean; zombie: boolean; cpu: number; io: number } {
   let names: string[]
   try {
     names = readdirSync("/proc")
   } catch {
-    return { alive: true, zombie: false, cpu: NaN }
+    return { alive: true, zombie: false, cpu: NaN, io: 0 }
   }
   const info = new Map<number, { ppid: number; state: string; cpu: number }>()
   for (const n of names) {
@@ -94,8 +128,9 @@ export function subtreeCpu(root: number): { alive: boolean; zombie: boolean; cpu
     if (rec) info.set(Number(n), rec)
   }
   const rootRec = info.get(root)
-  if (!rootRec) return { alive: false, zombie: false, cpu: 0 }
+  if (!rootRec) return { alive: false, zombie: false, cpu: 0, io: 0 }
   let cpu = 0
+  let io = 0
   const stack = [root]
   const seen = new Set<number>()
   while (stack.length > 0) {
@@ -104,9 +139,10 @@ export function subtreeCpu(root: number): { alive: boolean; zombie: boolean; cpu
     seen.add(p)
     const rec = info.get(p)
     if (rec) cpu += rec.cpu
+    io += readProcIo(p)
     for (const [pid, r] of info) if (r.ppid === p) stack.push(pid)
   }
-  return { alive: true, zombie: rootRec.state === "Z", cpu }
+  return { alive: true, zombie: rootRec.state === "Z", cpu, io }
 }
 
 export async function runOnceAcp(input: RunInput): Promise<RunResult> {
@@ -190,14 +226,23 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   // subagent indefinitely.
   //
   // We do NOT kill on elapsed time alone. A silent period only TRIGGERS a
-  // health check: we sample the cline process tree's CPU usage over a short
-  // window and terminate only when the state is unrecoverable — the process is
-  // gone, defunct (zombie), or making zero progress (deadlocked). A cline that
-  // is genuinely working (inferring, or blocked on a long child command that is
-  // itself burning CPU) keeps advancing and is left alone.
+  // health check: we sample the cline process tree's CPU *and* I/O over a short
+  // window (see subtreeProgress) and terminate only when the state is
+  // unrecoverable — the process is gone, defunct (zombie), or advanced NEITHER
+  // CPU nor I/O (deadlocked). A cline that is genuinely working keeps advancing
+  // and is left alone: local inference / a busy child burns CPU, while a remote
+  // model wait or the multi-MB task-history read+rewrite moves I/O bytes at ~0
+  // CPU. (Sampling CPU only, as the first cut did, false-killed those I/O-bound
+  // turns — the bug this fixes.)
+  //
+  // Default silence window is 300s. A slow cold first turn (big prompt, cold
+  // page cache, a bloated ~/.cline-sr task-history file, or a queued remote
+  // model) can legitimately produce no ACP event for over a minute; the old 90s
+  // default cut those off. A real deadlock hangs indefinitely (25+ min observed)
+  // so 300s still recovers it well before that. Override with the env var.
   const idleMs = (() => {
     const raw = Number(process.env["OPENCODE_ANYCLI_ACP_IDLE_MS"])
-    return Number.isFinite(raw) && raw > 0 ? raw : 90_000
+    return Number.isFinite(raw) && raw > 0 ? raw : 300_000
   })()
   const probeMs = 3_000
   let idleTimer: ReturnType<typeof setTimeout> | null = null
@@ -226,18 +271,20 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
     clearIdle()
     idleTimer = setTimeout(() => {
       if (done) return
-      const before = subtreeCpu(pid)
+      const before = subtreeProgress(pid)
       if (!before.alive) return terminateHung("process exited without a terminal event")
       if (before.zombie) return terminateHung("process is defunct (zombie)")
       if (Number.isNaN(before.cpu)) return armIdle() // can't probe (no /proc) — keep waiting
-      // Silent for idleMs. Sample CPU again after a short window: terminate only
-      // if the tree is gone/defunct or made no progress (deadlocked).
+      // Silent for idleMs. Sample again after a short window: terminate only if
+      // the tree is gone/defunct or advanced NEITHER CPU nor I/O (deadlocked).
       probeTimer = setTimeout(() => {
         if (done) return
-        const after = subtreeCpu(pid)
+        const after = subtreeProgress(pid)
         if (!after.alive) return terminateHung("process exited without a terminal event")
-        if (after.zombie || (!Number.isNaN(after.cpu) && after.cpu <= before.cpu)) {
-          return terminateHung(`stalled with no output for ${Math.round(idleMs / 1000)}s and no CPU progress (deadlocked)`)
+        if (Number.isNaN(after.cpu)) return armIdle() // probe failed this round — keep waiting
+        if (after.zombie) return terminateHung("process is defunct (zombie)")
+        if (after.cpu <= before.cpu && after.io <= before.io) {
+          return terminateHung(`stalled with no output for ${Math.round(idleMs / 1000)}s and no CPU or I/O progress (deadlocked)`)
         }
         armIdle() // still making progress — leave it running
       }, probeMs)

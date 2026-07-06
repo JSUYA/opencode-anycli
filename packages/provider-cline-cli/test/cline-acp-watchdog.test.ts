@@ -1,18 +1,18 @@
 import { spawn } from "node:child_process"
 import { describe, expect, it } from "vitest"
-import { readProcStat, subtreeCpu } from "../src/cline-acp-runner.js"
+import { readProcStat, subtreeProgress } from "../src/cline-acp-runner.js"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const linux = process.platform === "linux"
 
-describe.skipIf(!linux)("subtreeCpu health probe (state-based, not time-based)", () => {
+describe.skipIf(!linux)("subtreeProgress health probe (state-based, not time-based)", () => {
   it("reports a busy process as making CPU progress", async () => {
     const child = spawn("node", ["-e", "const end=Date.now()+4000;while(Date.now()<end){}"], { stdio: "ignore" })
     try {
       await sleep(300)
-      const before = subtreeCpu(child.pid!)
+      const before = subtreeProgress(child.pid!)
       await sleep(1200)
-      const after = subtreeCpu(child.pid!)
+      const after = subtreeProgress(child.pid!)
       expect(before.alive).toBe(true)
       expect(after.alive).toBe(true)
       // A spinning process advances CPU jiffies → watchdog would NOT kill it.
@@ -22,16 +22,37 @@ describe.skipIf(!linux)("subtreeCpu health probe (state-based, not time-based)",
     }
   })
 
-  it("reports a sleeping (blocked) process as making NO CPU progress", async () => {
+  it("reports an I/O-bound process (idle CPU) as making progress", async () => {
+    // A process that reads a file in a tight loop moves rchar bytes while
+    // burning almost no CPU. This is the shape of a cline streaming from a
+    // remote model or reading+rewriting its task-history file — the case a
+    // CPU-only probe used to misread as a deadlock and false-kill.
+    const child = spawn("sh", ["-c", "while :; do cat /proc/self/status >/dev/null; done"], { stdio: "ignore" })
+    try {
+      await sleep(300)
+      const before = subtreeProgress(child.pid!)
+      await sleep(1200)
+      const after = subtreeProgress(child.pid!)
+      expect(after.alive).toBe(true)
+      // I/O bytes advance even though this is not a CPU-spin → NOT killed.
+      expect(after.io).toBeGreaterThan(before.io)
+    } finally {
+      child.kill("SIGKILL")
+    }
+  })
+
+  it("reports a truly idle process (no CPU, no I/O) as making no progress", async () => {
     const child = spawn("sleep", ["5"], { stdio: "ignore" })
     try {
       await sleep(300)
-      const before = subtreeCpu(child.pid!)
+      const before = subtreeProgress(child.pid!)
       await sleep(1200)
-      const after = subtreeCpu(child.pid!)
+      const after = subtreeProgress(child.pid!)
       expect(after.alive).toBe(true)
-      // Idle/blocked → cpu flat → watchdog would treat as deadlocked.
+      // A sleeping process advances neither CPU nor I/O → the watchdog treats
+      // this (after the full silence window) as deadlocked.
       expect(after.cpu).toBe(before.cpu)
+      expect(after.io).toBe(before.io)
     } finally {
       child.kill("SIGKILL")
     }
@@ -45,9 +66,9 @@ describe.skipIf(!linux)("subtreeCpu health probe (state-based, not time-based)",
     })
     try {
       await sleep(400)
-      const before = subtreeCpu(parent.pid!)
+      const before = subtreeProgress(parent.pid!)
       await sleep(1200)
-      const after = subtreeCpu(parent.pid!)
+      const after = subtreeProgress(parent.pid!)
       expect(after.alive).toBe(true)
       expect(after.cpu).toBeGreaterThan(before.cpu)
     } finally {
@@ -63,7 +84,7 @@ describe.skipIf(!linux)("subtreeCpu health probe (state-based, not time-based)",
       child.kill("SIGKILL")
     })
     await sleep(100)
-    expect(subtreeCpu(pid).alive).toBe(false)
+    expect(subtreeProgress(pid).alive).toBe(false)
     expect(readProcStat(pid)).toBeNull()
   })
 })
