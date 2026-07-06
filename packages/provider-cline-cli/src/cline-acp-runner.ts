@@ -178,7 +178,20 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   // dir touched during THIS run. -1000ms guards against clock skew.
   const runStartMs = Date.now() - 1000
 
-  const args = ["--acp", ...(options.extraArgs ?? [])]
+  // Headless auto-approval. `cline --acp` is otherwise INTERACTIVE: it blocks
+  // mid-turn on asks that have no ACP responder. Tool approvals do come through
+  // `session/request_permission` (which our client auto-allows), but cline's
+  // FRAMEWORK asks — `mistake_limit_reached` ("Cline is having trouble, continue
+  // with guidance?") and `resume_task` — are not bridged; cline holds the turn
+  // open waiting for an answer that never arrives, so it sits at zero CPU/IO
+  // until the watchdog kills it and opencode retries (the endless "Thinking"
+  // loop we observed). --yolo + --auto-approve-all run cline fully
+  // non-interactively so those asks auto-proceed instead of hanging. This
+  // auto-approves ALL actions (including shell commands) without prompting —
+  // matching subprocess mode, which already runs `--yolo`. Escape hatch: set
+  // OPENCODE_ANYCLI_ACP_NO_YOLO=1 to drop them (turns may then hang on an ask).
+  const autoApprove = process.env["OPENCODE_ANYCLI_ACP_NO_YOLO"] === "1" ? [] : ["--yolo", "--auto-approve-all"]
+  const args = ["--acp", ...autoApprove, ...(options.extraArgs ?? [])]
   const env = { ...process.env, ...(options.env ?? {}) }
 
   // stdin/stdout are the JSON-RPC transport. stderr is PIPED (not inherited)
