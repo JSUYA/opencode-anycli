@@ -186,6 +186,10 @@ export async function* runClineTurn(request: ClineTurnRequest): AsyncGenerator<C
         const out = parser.feed(event.delta)
         if (out.text.length > 0) yield { type: "text-delta", delta: out.text }
         for (const call of out.calls) yield* emitCall(call)
+        if (emittedOpencodeCallCount > 0) {
+          yield { type: "finish", usage, finishReason: "tool-calls", raw: "host-tool-call" }
+          return
+        }
       } else if (event.type === "tool-call") {
         yield { type: "cline-tool", toolName: event.toolName, summary: event.toolName }
       } else if (event.type === "tool-result") {
@@ -299,7 +303,7 @@ function registeredSupportedToolNames(tools: readonly ProtocolToolDescriptor[]):
   return out
 }
 
-function createToolCallSignature(toolName: string, input: unknown): string {
+export function createToolCallSignature(toolName: string, input: unknown): string {
   try {
     const sortedInput = JSON.stringify(input, Object.keys((input ?? {}) as object).sort())
     return JSON.stringify({ toolName, input: sortedInput })

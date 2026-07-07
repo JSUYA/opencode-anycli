@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net"
 
 import {
+  createToolCallSignature,
   emptyClineUsage,
   runClineTurn,
   runClineTurnOnce,
@@ -48,13 +49,11 @@ interface ChatCompletionRequest {
 export async function startOpenAiCompatServer(options: OpenAiCompatServerOptions): Promise<OpenAiCompatServerHandle> {
   const host = options.host ?? "127.0.0.1"
   const token = options.token ?? randomBytes(24).toString("base64url")
-  const previousToolCalls = new Set<string>()
   const server = createServer((req, res) => {
     void handleRequest(req, res, {
       ...options,
       host,
       token,
-      previousToolCalls,
     }).catch((err) => {
       sendJson(res, 500, {
         error: {
@@ -80,7 +79,6 @@ export async function startOpenAiCompatServer(options: OpenAiCompatServerOptions
 interface RequestContext extends OpenAiCompatServerOptions {
   host: string
   token: string
-  previousToolCalls: Set<string>
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RequestContext): Promise<void> {
@@ -151,7 +149,7 @@ async function handleChatCompletion(
     modelId: parsed.model,
     signal: abort.signal,
     config: ctx.config,
-    previousToolCalls: ctx.previousToolCalls,
+    previousToolCalls: previousToolCallsFromMessages(parsed.messages),
   }
 
   if (parsed.stream === true) {
@@ -173,6 +171,21 @@ export function openAiToolsToProtocolTools(tools: readonly unknown[]): ProtocolT
     const fn = tool["function"]
     if (!isRecord(fn) || typeof fn["name"] !== "string") continue
     out.push({ name: fn["name"] })
+  }
+  return out
+}
+
+function previousToolCallsFromMessages(messages: readonly unknown[]): Set<string> {
+  const out = new Set<string>()
+  for (const message of messages) {
+    if (!isRecord(message) || message["role"] !== "assistant") continue
+    const toolCalls = Array.isArray(message["tool_calls"]) ? message["tool_calls"] : []
+    for (const toolCall of toolCalls) {
+      if (!isRecord(toolCall)) continue
+      const fn = toolCall["function"]
+      if (!isRecord(fn) || typeof fn["name"] !== "string") continue
+      out.add(createToolCallSignature(fn["name"], parseToolArguments(fn["arguments"])))
+    }
   }
   return out
 }

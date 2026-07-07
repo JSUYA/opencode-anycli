@@ -41,6 +41,33 @@ describe("runClineTurn", () => {
     expect(events.at(-1)).toMatchObject({ type: "finish", finishReason: "tool-calls" })
   })
 
+  it("finishes immediately after host-side opencode calls", async () => {
+    const events = await collect(
+      runClineTurn({
+        prompt: [{ role: "user", content: "review this" }],
+        tools: [{ name: "task" }],
+        modelId: "GaussO4.1-CLI",
+        runners: {
+          detectAcpSupport: async () => false,
+          runStream: fakeStream([
+            {
+              type: "text-delta",
+              delta:
+                '<opencode-call name="task">{"subagent_type":"code-reviewer","description":"review","prompt":"review this"}</opencode-call>',
+            },
+            { type: "text-delta", delta: "waiting for the subagent result..." },
+            { type: "finish", usage: emptyClineUsage(), parseErrors: 0 },
+          ]),
+        },
+      }),
+    )
+
+    expect(events).toEqual([
+      expect.objectContaining({ type: "opencode-call", toolName: "task" }),
+      expect.objectContaining({ type: "finish", finishReason: "tool-calls" }),
+    ])
+  })
+
   it("bypasses slash-command skill dispatch before running cline", async () => {
     const events = await collect(
       runClineTurn({

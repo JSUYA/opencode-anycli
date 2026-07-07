@@ -131,6 +131,25 @@ describe("openai-compatible facade", () => {
     expect(chunks.some((chunk) => chunk.usage?.prompt_tokens === 5 && chunk.choices?.length === 0)).toBe(true)
   })
 
+  it("does not share duplicate tool-call state across independent requests", async () => {
+    const seenSizes: number[] = []
+    const handle = await startOpenAiCompatServer({
+      models: [{ id: "GaussO4.1-CLI" }],
+      token: "test-token",
+      runTurn: async function* (request) {
+        seenSizes.push(request.previousToolCalls?.size ?? 0)
+        request.previousToolCalls?.add("sentinel")
+        yield { type: "finish", finishReason: "stop", usage: emptyClineUsage() }
+      },
+    })
+    handles.push(handle)
+
+    await postChat(handle, { model: "GaussO4.1-CLI", messages: [{ role: "user", content: "one" }] })
+    await postChat(handle, { model: "GaussO4.1-CLI", messages: [{ role: "user", content: "two" }] })
+
+    expect(seenSizes).toEqual([0, 0])
+  })
+
   it("aborts the turn signal when a streaming client disconnects", async () => {
     let abortResolved!: () => void
     const aborted = new Promise<void>((resolve) => {
