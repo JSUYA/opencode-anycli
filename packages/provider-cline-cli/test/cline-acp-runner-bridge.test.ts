@@ -60,6 +60,18 @@ describe("translateSessionUpdate — ACP tool bridging", () => {
     expect(events).toEqual([{ type: "text-delta", delta: "answer" }])
   })
 
+  it("drops a repeated assistant message stream", () => {
+    const { events, ctx: c } = ctx()
+    translateSessionUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hel" } } as any, c)
+    translateSessionUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "lo" } } as any, c)
+    translateSessionUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hel" } } as any, c)
+    translateSessionUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "lo" } } as any, c)
+    expect(events).toEqual([
+      { type: "text-delta", delta: "hel" },
+      { type: "text-delta", delta: "lo" },
+    ])
+  })
+
   it("emits a text fallback for unmapped kinds", () => {
     const { events, ctx: c } = ctx()
     translateSessionUpdate({ sessionUpdate: "tool_call", toolCallId: "t4", kind: "fetch", title: "Fetch url", rawInput: {} } as any, c)

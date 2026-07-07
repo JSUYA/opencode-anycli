@@ -405,7 +405,7 @@ async function* runStreamAcpInternal(input: RunInput): AsyncGenerator<StreamEven
   // the user-visible text reads "FOO" + "FOO". We track the running
   // assistant accumulator and drop any chunk that is an exact duplicate
   // of (or strict prefix-restate of) what we've already streamed.
-  const assistantState = { acc: "" }
+  const assistantState = { acc: "", replayOffset: undefined as number | undefined }
   // ACP tool_call carries `kind`+`rawInput`; the matching tool_call_update(s)
   // carry `status`/`rawOutput` (often WITHOUT kind). Stash the resolved
   // opencode tool name + kind by toolCallId so the terminal update can emit
@@ -543,7 +543,7 @@ export function translateSessionUpdate(
   ctx: {
     enqueue: (ev: StreamEvent) => void
     emittedReads: Set<string>
-    assistantState: { acc: string }
+    assistantState: { acc: string; replayOffset?: number | undefined }
     pendingTools: Map<string, { toolName: string; kind: string | undefined }>
   },
 ): void {
@@ -561,11 +561,30 @@ export function translateSessionUpdate(
       // incoming chunk is exactly what we've already accumulated, drop it.
       const text = blockToText(update.content)
       if (!text) return
+      if (ctx.assistantState.replayOffset !== undefined) {
+        const replayTail = ctx.assistantState.acc.slice(
+          ctx.assistantState.replayOffset,
+          ctx.assistantState.replayOffset + text.length,
+        )
+        if (text === replayTail) {
+          ctx.assistantState.replayOffset += text.length
+          if (ctx.assistantState.replayOffset >= ctx.assistantState.acc.length) {
+            ctx.assistantState.replayOffset = undefined
+          }
+          return
+        }
+        ctx.assistantState.replayOffset = undefined
+      }
       if (text === ctx.assistantState.acc) return
       if (ctx.assistantState.acc.length > 0 && text.startsWith(ctx.assistantState.acc)) {
         const tail = text.slice(ctx.assistantState.acc.length)
         ctx.assistantState.acc = text
+        ctx.assistantState.replayOffset = undefined
         ctx.enqueue({ type: "text-delta", delta: tail })
+        return
+      }
+      if (ctx.assistantState.acc.length > 0 && ctx.assistantState.acc.startsWith(text)) {
+        ctx.assistantState.replayOffset = text.length
         return
       }
       ctx.assistantState.acc += text

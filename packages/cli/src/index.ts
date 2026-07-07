@@ -16,10 +16,10 @@ import { homedir } from "node:os"
 import { resolveConfig, defaultConfigPath, readConfig } from "./config.js"
 import { checkOpencode, checkCline } from "./ensure-opencode.js"
 import { materializeTempConfig } from "./temp-config.js"
+import { parseProviderMode, resolveProviderMode, type ProviderMode } from "./provider-mode.js"
 import { printClineVersionExitNotice } from "./version-notice.js"
 
 const VERSION = "0.1.0"
-type ProviderMode = "direct" | "openai-compat"
 
 interface Args {
   config?: string | undefined
@@ -42,11 +42,6 @@ interface Args {
    */
   dangerouslySkipPermissions?: boolean | undefined
   passthrough: string[]
-}
-
-function parseProviderMode(value: string | undefined): ProviderMode {
-  if (value === "direct" || value === "openai-compat") return value
-  throw new Error(`Unsupported provider mode: ${value ?? "(missing)"}. Expected "direct" or "openai-compat".`)
 }
 
 interface OpenAiCompatRuntime {
@@ -242,9 +237,10 @@ Flags:
                            propagates auto-approve to the OUTER opencode
                            layer too. Per-key user-set "deny" rules in your
  own config are still honored.
- --provider <direct|openai-compat>
-   Select provider wiring. "direct" keeps the AI SDK custom provider.
-   "openai-compat" starts a local OpenAI-compatible facade.
+  --provider <direct|openai-compat>
+      Select provider wiring. Defaults to "openai-compat", which starts a
+      local OpenAI-compatible facade. Use "direct" for the legacy AI SDK
+      custom provider.
   --tty                    DEPRECATED no-op. TTY is now on by default —
                            the cline subprocess inherits the parent's
                            stdin so interactive prompts (sudo, ssh-add,
@@ -572,11 +568,12 @@ async function main(): Promise<void> {
     return
   }
 
-  // Materialise a session-scoped temp config when --auto-approve / --yolo /
-  // OPENCODE_ANYCLI_AUTO_APPROVE is set. The original cfg.path is never
-  // touched. We schedule cleanup of the temp file on process exit.
+  // Materialise a session-scoped temp config for runtime-only mutations. The
+  // original cfg.path is never touched. We schedule cleanup of the temp file on
+  // process exit.
+  const providerMode = resolveProviderMode(args.providerMode)
   let openAiCompat: OpenAiCompatRuntime | null = null
-  if (args.providerMode === "openai-compat") {
+  if (providerMode === "openai-compat") {
     openAiCompat = await startOpenAiCompatRuntime(cfg.path)
     process.stderr.write(`opencode-anycli: openai-compat facade listening at ${openAiCompat.baseURL}\n`)
   }
