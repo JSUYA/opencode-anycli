@@ -13,12 +13,13 @@ import { dirname, resolve as pathResolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { existsSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
-import { resolveConfig, defaultConfigPath } from "./config.js"
+import { resolveConfig, defaultConfigPath, readConfig } from "./config.js"
 import { checkOpencode, checkCline } from "./ensure-opencode.js"
 import { materializeTempConfig } from "./temp-config.js"
 import { printClineVersionExitNotice } from "./version-notice.js"
 
 const VERSION = "0.1.0"
+type ProviderMode = "direct" | "openai-compat"
 
 interface Args {
   config?: string | undefined
@@ -31,6 +32,7 @@ interface Args {
   help?: boolean | undefined
   autoApprove?: boolean | undefined
   noTty?: boolean | undefined
+  providerMode?: ProviderMode | undefined
   /**
    * --allow-dangerously-skip-permissions: re-execute the entire session
    * under sudo (one password prompt up front), so the inner cline + bash
@@ -42,6 +44,65 @@ interface Args {
   passthrough: string[]
 }
 
+function parseProviderMode(value: string | undefined): ProviderMode {
+  if (value === "direct" || value === "openai-compat") return value
+  throw new Error(`Unsupported provider mode: ${value ?? "(missing)"}. Expected "direct" or "openai-compat".`)
+}
+
+interface OpenAiCompatRuntime {
+  baseURL: string
+  token: string
+  close: () => Promise<void>
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function clineProviderFromConfig(path: string): Record<string, unknown> {
+  const config = readConfig(path)
+  if (!isRecord(config)) return {}
+  const provider = isRecord(config["provider"]) ? config["provider"] : {}
+  return isRecord(provider["cline"]) ? provider["cline"] : {}
+}
+
+function clineModelsFromConfig(path: string): Array<{ id: string; name?: string }> {
+  const cline = clineProviderFromConfig(path)
+  const models = isRecord(cline["models"]) ? cline["models"] : {}
+  const out: Array<{ id: string; name?: string }> = []
+  for (const [id, def] of Object.entries(models)) {
+    const name = isRecord(def) && typeof def["name"] === "string" ? def["name"] : undefined
+    out.push(name ? { id, name } : { id })
+  }
+  return out.length > 0 ? out : [{ id: "GaussO4.1-CLI", name: "Cline GaussO4.1-CLI" }]
+}
+
+function clineRuntimeConfigFromConfig(path: string): Record<string, unknown> {
+  const cline = clineProviderFromConfig(path)
+  const options = isRecord(cline["options"]) ? cline["options"] : {}
+  const out: Record<string, unknown> = {
+    command: process.env["OPENCODE_ANYCLI_CLINE_BIN"] || (typeof options["command"] === "string" ? options["command"] : "cline"),
+    mode: process.env["OPENCODE_ANYCLI_MODE"] || (typeof options["mode"] === "string" ? options["mode"] : "auto"),
+  }
+  if (typeof options["timeoutMs"] === "number") out["timeoutMs"] = options["timeoutMs"]
+  return out
+}
+
+async function startOpenAiCompatRuntime(configPath: string): Promise<OpenAiCompatRuntime> {
+  type StartServer = (options: {
+    models: Array<{ id: string; name?: string }>
+    config?: Record<string, unknown>
+  }) => Promise<OpenAiCompatRuntime>
+
+  const mod = (await import("@opencode-anycli/provider-cline-cli/openai-compat")) as unknown as {
+    startOpenAiCompatServer: StartServer
+  }
+  return mod.startOpenAiCompatServer({
+    models: clineModelsFromConfig(configPath),
+    config: clineRuntimeConfigFromConfig(configPath),
+  })
+}
+
 function parseArgs(argv: readonly string[]): Args {
   const out: Args = { passthrough: [] }
   for (let i = 0; i < argv.length; i++) {
@@ -49,6 +110,9 @@ function parseArgs(argv: readonly string[]): Args {
     switch (a) {
       case "--config":
         out.config = argv[++i]
+        break
+      case "--provider":
+        out.providerMode = parseProviderMode(argv[++i])
         break
       case "--init":
         out.init = true
@@ -115,6 +179,9 @@ function parseArgs(argv: readonly string[]): Args {
   if (process.env["OPENCODE_ANYCLI_TTY"] === "0") {
     out.noTty = true
   }
+  if (process.env["OPENCODE_ANYCLI_PROVIDER"]) {
+    out.providerMode = parseProviderMode(process.env["OPENCODE_ANYCLI_PROVIDER"])
+  }
   // OPENCODE_ANYCLI_DANGEROUS=1 is equivalent to --allow-dangerously-skip-permissions.
   if (process.env["OPENCODE_ANYCLI_DANGEROUS"] === "1") {
     out.dangerouslySkipPermissions = true
@@ -174,7 +241,10 @@ Flags:
                            subprocess already runs with --yolo, so this flag
                            propagates auto-approve to the OUTER opencode
                            layer too. Per-key user-set "deny" rules in your
-                           own config are still honored.
+ own config are still honored.
+ --provider <direct|openai-compat>
+   Select provider wiring. "direct" keeps the AI SDK custom provider.
+   "openai-compat" starts a local OpenAI-compatible facade.
   --tty                    DEPRECATED no-op. TTY is now on by default —
                            the cline subprocess inherits the parent's
                            stdin so interactive prompts (sudo, ssh-add,
@@ -505,16 +575,29 @@ async function main(): Promise<void> {
   // Materialise a session-scoped temp config when --auto-approve / --yolo /
   // OPENCODE_ANYCLI_AUTO_APPROVE is set. The original cfg.path is never
   // touched. We schedule cleanup of the temp file on process exit.
+  let openAiCompat: OpenAiCompatRuntime | null = null
+  if (args.providerMode === "openai-compat") {
+    openAiCompat = await startOpenAiCompatRuntime(cfg.path)
+    process.stderr.write(`opencode-anycli: openai-compat facade listening at ${openAiCompat.baseURL}\n`)
+  }
+
   let configPathForOpencode = cfg.path
   let cleanupPath: string | null = null
   const tempConfig = materializeTempConfig(cfg.path, {
     autoApprove: !!args.autoApprove,
+    openAiCompat: openAiCompat ? { baseURL: openAiCompat.baseURL, apiKey: openAiCompat.token } : undefined,
   })
   if (tempConfig) {
     configPathForOpencode = tempConfig.path
     cleanupPath = tempConfig.path
     for (const note of tempConfig.notes) process.stderr.write(`opencode-anycli: ${note}\n`)
-    const cleanup = () => {
+  }
+
+  const cleanup = () => {
+      if (openAiCompat) {
+        void openAiCompat.close().catch(() => {})
+        openAiCompat = null
+      }
       if (cleanupPath) {
         try { rmSync(cleanupPath, { force: true }) } catch { /* ignore */ }
         try { rmSync(dirname(cleanupPath), { recursive: true, force: true }) } catch { /* ignore */ }
@@ -524,8 +607,6 @@ async function main(): Promise<void> {
     process.on("exit", cleanup)
     process.on("SIGINT", () => { cleanup(); process.exit(130) })
     process.on("SIGTERM", () => { cleanup(); process.exit(143) })
-  }
-
   // Spawn opencode with OPENCODE_CONFIG pointing at our resolved file
   // (or the auto-approve temp file when applicable).
   // Also set XDG_CONFIG_HOME so opencode auto-discovers our wrapper-private
@@ -571,6 +652,7 @@ async function main(): Promise<void> {
   }
   const child = spawn("opencode", args.passthrough, { stdio: "inherit", env })
   child.on("close", (code, signal) => {
+    cleanup()
     printClineVersionExitNotice(clineVersion)
     if (signal) {
       process.exit(1)
@@ -578,6 +660,7 @@ async function main(): Promise<void> {
     process.exit(code ?? 0)
   })
   child.on("error", (err) => {
+    cleanup()
     process.stderr.write(`Failed to spawn opencode: ${err.message}\n`)
     process.exit(1)
   })

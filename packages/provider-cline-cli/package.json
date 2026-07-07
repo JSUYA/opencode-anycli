@@ -26,6 +26,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./openai-compat": {
+      "types": "./dist/openai-compat.d.ts",
+      "import": "./dist/openai-compat.js"
     }
   },
   "files": [

@@ -1,5 +1,18 @@
 # Provider Modes
 
+## OpenAI-compatible facade (experimental)
+
+Set `OPENCODE_ANYCLI_PROVIDER=openai-compat` or pass
+`opencode-anycli --provider openai-compat` to start a local OpenAI-compatible
+server before opencode starts. The wrapper materializes a temporary opencode
+config that keeps the provider id as `cline`, but changes its implementation to
+`@ai-sdk/openai-compatible` with a local `baseURL` and one-time bearer token.
+
+The facade still calls the local `cline` CLI internally. It does not read cline
+credentials or call the model API directly. Cline-native tool activity remains
+internal to cline; host-side opencode calls such as `skill` and `task` are
+returned as OpenAI `tool_calls`.
+
 The provider drives one of three CLIs, selected by the `cli` option
 (`cline` / `claude` / `codex`). cline supports the three `mode` values below;
 claude and codex always run as subprocess stream-json sessions (see the last

@@ -1,19 +1,5 @@
-// Runtime opencode config materialization.
-//
-// When the wrapper needs to override or extend the user's resolved
-// opencode.json without touching the original file, it composes the
-// requested mutations here and writes the result to a single temp file.
-// `OPENCODE_CONFIG` is then pointed at that temp path, and the file is
-// cleaned up on exit.
-//
-// Currently the only mutation is auto-approve: mark every documented
-// opencode permission as "allow" (top-level + per-agent), so a long-
-// running session does not interrupt for every tool call. Existing
-// user-set "deny" rules win.
-//
-// If no mutation is requested or the original config already covers the
-// requested behaviour, the function returns null and the caller falls
-// back to the original path.
+// opencode config materialization. Optional runtime-only mutations are written
+// to a temp file and passed to opencode through OPENCODE_CONFIG.
 
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -38,6 +24,12 @@ const ALL_PERMISSION_KEYS = [
 
 export interface TempConfigOptions {
   autoApprove: boolean
+  openAiCompat?: OpenAiCompatTempConfig | undefined
+}
+
+export interface OpenAiCompatTempConfig {
+  baseURL: string
+  apiKey: string
 }
 
 export interface TempConfigResult {
@@ -47,40 +39,56 @@ export interface TempConfigResult {
 
 function allowAllPermissions(): Record<string, "allow"> {
   const out: Record<string, "allow"> = {}
-  for (const k of ALL_PERMISSION_KEYS) out[k] = "allow"
+  for (const key of ALL_PERMISSION_KEYS) out[key] = "allow"
   return out
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-export function materializeTempConfig(
-  originalPath: string,
-  options: TempConfigOptions,
-): TempConfigResult | null {
-  if (!options.autoApprove) return null
+export function materializeTempConfig(originalPath: string, options: TempConfigOptions): TempConfigResult | null {
+  if (!options.autoApprove && !options.openAiCompat) return null
 
   const original = JSON.parse(readFileSync(originalPath, "utf8")) as Record<string, unknown>
-  // Deep-clone so we never mutate the caller's reference.
   const config = JSON.parse(JSON.stringify(original)) as Record<string, unknown>
   const notes: string[] = []
 
-  const allow = allowAllPermissions()
-  const existingTop = isRecord(config["permission"]) ? config["permission"] : {}
-  config["permission"] = { ...allow, ...existingTop }
-  const existingAgents = isRecord(config["agent"]) ? config["agent"] : {}
-  const mergedAgents: Record<string, unknown> = {}
-  for (const [name, agent] of Object.entries(existingAgents)) {
-    if (!isRecord(agent)) {
-      mergedAgents[name] = agent
-      continue
+  if (options.autoApprove) {
+    const allow = allowAllPermissions()
+    const existingTop = isRecord(config["permission"]) ? config["permission"] : {}
+    config["permission"] = { ...allow, ...existingTop }
+
+    const existingAgents = isRecord(config["agent"]) ? config["agent"] : {}
+    const mergedAgents: Record<string, unknown> = {}
+    for (const [name, agent] of Object.entries(existingAgents)) {
+      if (!isRecord(agent)) {
+        mergedAgents[name] = agent
+        continue
+      }
+      const existing = isRecord(agent["permission"]) ? agent["permission"] : {}
+      mergedAgents[name] = { ...agent, permission: { ...allow, ...existing } }
     }
-    const existing = isRecord(agent["permission"]) ? agent["permission"] : {}
-    mergedAgents[name] = { ...agent, permission: { ...allow, ...existing } }
+    config["agent"] = mergedAgents
+    notes.push("auto-approve: all opencode permissions set to allow")
   }
-  config["agent"] = mergedAgents
-  notes.push("auto-approve: all opencode permissions set to allow")
+
+  if (options.openAiCompat) {
+    const provider = isRecord(config["provider"]) ? { ...config["provider"] } : {}
+    const existingCline = isRecord(provider["cline"]) ? provider["cline"] : {}
+    provider["cline"] = {
+      ...existingCline,
+      npm: "@ai-sdk/openai-compatible",
+      name: "Cline (OpenAI-compatible facade)",
+      options: {
+        baseURL: options.openAiCompat.baseURL,
+        apiKey: options.openAiCompat.apiKey,
+        includeUsage: true,
+      },
+    }
+    config["provider"] = provider
+    notes.push("openai-compat: cline provider routed to local facade")
+  }
 
   const dir = mkdtempSync(join(tmpdir(), "opencode-anycli-cfg-"))
   const path = join(dir, "opencode.json")
@@ -89,11 +97,13 @@ export function materializeTempConfig(
 }
 
 /**
- * Backward-compat shim — kept for any callers that still import the older
- * name. Equivalent to `materializeTempConfig({ autoApprove: true })`.
+ * Backward-compat shim kept for callers that still import the older name.
+ * Equivalent to `materializeTempConfig({ autoApprove: true })`.
  */
 export function materializeAutoApproveConfig(originalPath: string): string {
   const r = materializeTempConfig(originalPath, { autoApprove: true })
   if (!r) throw new Error("materializeAutoApproveConfig: nothing to mutate")
   return r.path
 }
+
+export default materializeTempConfig

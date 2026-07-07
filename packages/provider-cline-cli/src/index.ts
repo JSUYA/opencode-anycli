@@ -16,6 +16,31 @@ export { runOnce, runStream } from "./cline-runner.js"
 export { runOnceAcp, runStreamAcp } from "./cline-acp-runner.js"
 export { runStreamJson } from "./stream-json-runner.js"
 export {
+  DEFAULT_CLINE_TURN_MAX_TURNS,
+  DEFAULT_CLINE_TURN_TIMEOUT_MS,
+  emptyClineUsage,
+  runClineTurn,
+  runClineTurnGenerate,
+  runClineTurnOnce,
+} from "./cline-turn-engine.js"
+export type {
+  ClineTurnConfig,
+  ClineTurnEvent,
+  ClineTurnRequest,
+  ClineTurnResult,
+  ClineTurnRunners,
+} from "./cline-turn-engine.js"
+export {
+  openAiMessagesToPrompt,
+  openAiToolsToProtocolTools,
+  startOpenAiCompatServer,
+} from "./openai-compat-server.js"
+export type {
+  OpenAiCompatModel,
+  OpenAiCompatServerHandle,
+  OpenAiCompatServerOptions,
+} from "./openai-compat-server.js"
+export {
   resolveCliRunProfile,
   deriveModelDef,
   CLAUDE_MODELS,
